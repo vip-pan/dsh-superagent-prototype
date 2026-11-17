@@ -293,7 +293,7 @@ async function pollTodos(ctx: SourceContext, round: Round): Promise<{ count: num
   if (state.get(KV.gitlab.since) === undefined) state.set(KV.gitlab.since, since)
   const { repository } = ctx.deployment.gitlab!
   // GitLab todos have no `since` filter; pending todos are read in full and filtered by creation time.
-  const todos = await commands.gitlabPages(TodoSchema, 'todos?per_page=100', round.tally)
+  const todos = await commands.gitlabPages(TodoSchema, 'todos', round.tally)
   const retries = { ...state.get(KV.gitlab.retries) }
   // Failed items from the previous round run first, followed by new todos in chronological order; each is read once.
   const items = new Map(Object.entries(retries))

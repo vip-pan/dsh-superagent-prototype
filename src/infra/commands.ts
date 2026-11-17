@@ -7,6 +7,8 @@ import type { Deployment } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
+/** Account-level GitLab endpoints outside the configured project that the polls legitimately call. */
+const ACCOUNT_ENDPOINTS = new Set(['todos', 'user'])
 /**
  * Error thrown by Commands when a CLI invocation fails, capturing stderr diagnostics, API error codes, and exit status without echoing command arguments.
  * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures.
@@ -161,13 +163,15 @@ export class Commands {
     }
     return results
   }
-  /** Resolves and restricts GitLab API paths to the configured project (`projects/<url-encoded path>`). */
+  /** Resolves and restricts GitLab API paths: project-relative paths are scoped to the configured project, full `projects/<…>` paths must stay inside it, and only the account-level endpoints the polls need pass through. */
   private gitlabPath(path: string): string {
     const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
     if (outside) throw new Error('GitLab calls are restricted to the configured project')
+    const head = path.split('?')[0] ?? ''
+    if (ACCOUNT_ENDPOINTS.has(head)) return path
     const prefix = `projects/${encodeURIComponent(this.deployment.gitlab?.repository ?? '')}`
-    if (path && path !== prefix && !path.startsWith(`${prefix}/`)) throw new Error('GitLab calls are restricted to the configured project')
-    return path || prefix
+    if (path === prefix || path.startsWith(`${prefix}/`)) return path
+    return path ? `${prefix}/${path}` : prefix
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
