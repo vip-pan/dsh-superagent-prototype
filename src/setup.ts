@@ -1,7 +1,7 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu'
+export type SetupPlace = 'deployment' | 'github' | 'gitlab' | 'feishu' | 'popo'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
@@ -14,11 +14,23 @@ export const SETUP_PROBLEMS = {
   repositoryUnreadable: ['github', '@{account} cannot read {repository}.'],
   repositoryUnreported: ['github', 'The agent GitHub CLI did not return {repository}.'],
   repositoryReadOnly: ['github', '@{account} cannot push to {repository}.'],
+  gitlabHostUnset: ['gitlab', 'The GitLab Source names no GitLab host.'],
+  gitlabRepositoryUnset: ['gitlab', 'The GitLab Source names no project.'],
+  gitlabCliUnset: ['gitlab', 'The agent GitLab CLI is not set.'],
+  gitlabCliMissing: ['gitlab', 'The agent GitLab CLI was not found.'],
+  gitlabCliFailed: ['gitlab', 'The agent GitLab CLI does not work against {host}.'],
+  gitlabCliSignedOut: ['gitlab', 'The agent GitLab CLI cannot read its account.'],
+  gitlabCliNoAccount: ['gitlab', 'The agent GitLab CLI did not report a GitLab account.'],
+  gitlabRepositoryUnreadable: ['gitlab', '@{account} cannot read {repository}.'],
+  gitlabRepositoryUnreported: ['gitlab', 'The agent GitLab CLI did not return {repository}.'],
+  gitlabRepositoryReadOnly: ['gitlab', '@{account} is below Developer on {repository}, so it cannot push.'],
   feishuCliFailed: ['feishu', 'The bot lark-cli does not work.'],
   feishuNoApp: ['feishu', 'auth status of the bot lark-cli did not report the app.'],
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],
   feishuUserIdentity: ['feishu', 'The bot lark-cli allows user identities (strict mode {mode}); give the bot its own lark-cli configuration in strict mode bot, as docs/006-deployment.md describes.'],
   feishuNoBot: ['feishu', 'The Feishu bot API did not return the bot\'s open_id.'],
+  popoCliFailed: ['popo', 'The POPO CLI does not work.'],
+  popoCliSignedOut: ['popo', 'The POPO CLI is not signed in.'],
 } as const satisfies Record<string, readonly [SetupPlace, string]>
 export type SetupCode = keyof typeof SETUP_PROBLEMS
 export interface SetupProblem { place: SetupPlace; code: SetupCode; values: Record<string, string>; detail: string }

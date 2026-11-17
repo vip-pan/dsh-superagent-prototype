@@ -249,7 +249,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 | `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
-| `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/poll.ts` | GitHub and Feishu payloads into Triggers and Thread facts, and messages into CLI calls |
+| `src/sources/github*.ts`, `src/sources/gitlab*.ts`, `src/sources/feishu*.ts`, `src/sources/popo*.ts`, `src/sources/poll.ts` | GitHub, GitLab, Feishu and POPO payloads into Triggers and Thread facts, and messages into CLI calls |
 | `src/deployment.ts`, `src/setup.ts`, `src/infra/` | Setup probes and problems, CLI transport, the agent's process environment |
 
 ## Dependency rules
@@ -277,12 +277,12 @@ Each model request binds the Session to the current prompt revision. The revisio
 Some generic modules still refer directly to GitHub or Feishu:
 
 - Outbox applies the Feishu chat word limit.
-- `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`.
-- `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
-- Runtime sends `pullEndNotices` for merged or closed Tickets.
-- Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
-- MasterAssessor reads repository files with `readRepositoryPath`.
-- Sessions and Prompts register built-in skills only for GitHub and Feishu. Migration converts their schema-10 records.
+- `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings` and `popoSettings`.
+- `src/app/resources.ts` reads the `feishu/`, `github/`, `gitlab/` and `popo/` originals; `src/app/cards.ts` uses `pullOf` and `mrOf` for Ticket cards.
+- Runtime sends `pullEndNotices` and `mrEndNotices` for merged or closed Tickets.
+- Executor tools bind reported pull requests and merge requests with `readPull`/`claimPull` and `readMr`/`claimMr`, using the GitHub context Runtime always exposes and the GitLab context it exposes while GitLab is configured.
+- MasterAssessor reads repository files with `readRepositoryPath`, and with `readGitlabRepositoryPath` for GitLab Tickets.
+- Sessions and Prompts register built-in skills for GitHub always, and Feishu, GitLab and POPO while their Sources are configured. Migration converts their schema-10 records.
 - Setup probes only GitHub and Feishu account fields (`SETUP_FIELDS`). Only those Sources receive account setup problems through `SourceContext.problem`.
 
 
@@ -361,17 +361,27 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/kind.ts` | The `SourceKind` protocol |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
-| `src/sources/poll.ts` | What GitHub and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
+| `src/sources/poll.ts` | What the polling Sources share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
 | `src/sources/github.ts` | The GitHub kind and plugin entry, exported as `./github-watch`: a poll round of notifications, the pull requests of open Tickets with their CI, and subscribed Threads |
 | `src/sources/github-trigger.ts` | GitHub comments, reviews, Issue bodies and CI changes as Triggers, and GitHub addresses |
 | `src/sources/github-pull.ts` | The pull request rules: which pull requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and `pullEndNotices`, the chat notice of a Ticket that ended merged or closed |
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
+| `src/sources/gitlab.ts` | The GitLab kind and plugin entry, exported as `./gitlab-watch`: a poll round of todos, the merge requests of open Tickets with their pipelines, and subscribed Threads |
+| `src/sources/gitlab-trigger.ts` | GitLab notes, Issue bodies, merge requests and pipeline changes as Triggers, and GitLab addresses |
+| `src/sources/gitlab-pull.ts` | The merge request rules: which merge requests a Ticket follows (`claimMr`, `observeMr`), the closes it reports to the Engine, and `mrEndNotices`, the chat notice of a Ticket that ended merged or closed |
+| `src/sources/gitlab-channel.ts` | The GitLab Channel: Issue and merge request notes, `sent` or `gone` |
+| `src/sources/gitlab-read.ts` | Pipeline snapshots, repository reads, the `gitlab/` resources, and `gitlabThreadContext`: an Issue's or merge request's conversation by page |
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
+| `src/sources/popo.ts` | The POPO kind and plugin entry, exported as `./popo-watch` |
+| `src/sources/popo-trigger.ts` | POPO message rows as Triggers, one rule for `message_search` results and `message_context` rows |
+| `src/sources/popo-loops.ts` | The POPO loop: a windowed `message_search` poll of every listened session, with a durable cursor and per-Thread seen lists |
+| `src/sources/popo-channel.ts` | The POPO Channel: `message_send_p2p` and `message_send_team` as the agent account, `sent` or `gone` |
+| `src/sources/popo-read.ts` | The `popo/` reads of a Trigger's session by page and of its message's context block, and `popoThreadContext` |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
@@ -397,7 +407,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/gitlab.ts`, `src/sources/feishu.ts` and `src/sources/popo.ts` are also the entries of the four Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./gitlab-watch`, `./feishu-watch` and `./popo-watch`. The bundle's `cordis.patch.yml` inserts the five plugins, with GitLab, Feishu and POPO disabled until their CLIs are configured.
 
 ## Tests
 
@@ -562,11 +572,11 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
 | `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
 | `models`, `models/<provider>` | Available models |
-| `feishu/<trigger id>/…`, `github/…` | Original Source records, described in the Source skills |
+| `feishu/<trigger id>/…`, `github/…`, `gitlab/…`, `popo/…` | Original Source records, described in the Source skills |
 
 Ticket Threads are marked `context` for context-only follows and `bound` for Source bindings. Assignment pages are newest first and include report previews. Continue lists with `next_offset`. `/input/<id>` accepts an Input's name or id. `settings` includes small blocks in full and summarizes Policy and Source blocks.
 
-Source resources include message neighborhoods, `github/pulls/<n>/thread/<comment id>` and `github/commits/<sha>/checks`.
+Source resources include message neighborhoods, `github/pulls/<n>/thread/<comment id>`, `github/commits/<sha>/checks`, `gitlab/mrs/<iid>/thread/<note id>` and `popo/<trigger id>/messages/<page>`.
 
 An original's messages read in one compact shape, `{id, from, at, text, reply_to?, path?, line?, url?}`, not as GitHub or Feishu records them.
 

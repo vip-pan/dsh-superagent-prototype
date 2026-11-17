@@ -46,16 +46,29 @@ export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
+export const GitlabAccountsSchema = z.object({
+  host: z.string().trim().regex(/^([A-Za-z0-9.-]+)?$/, 'GitLab host such as gitlab.example.com').default(''),
+  repository: z.string().trim().regex(/^(([A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)?$/, 'group/subgroup/name').default(''),
+  cli: z.string().trim().default(''),
+})
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+export const PopoBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  github: Object.keys(GithubAccountsSchema.shape), gitlab: Object.keys(GitlabAccountsSchema.shape),
+  feishu: Object.keys(FeishuBotSchema.shape), popo: Object.keys(PopoBotSchema.shape),
+}
 
 export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
+  gitlab?: GitlabAccount
   feishu?: FeishuBot
+  popo?: PopoBot
 }
+export interface GitlabAccount { cli: string; host: string; repository: string; login: string; noreply: string }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+export interface PopoBot { cli: string; uid: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -128,4 +141,59 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   const info = parsed(BotInfo, (await run('api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson')).split('\n')[0] ?? '')
   if (!info) return fail(new SetupError('feishuNoBot'))
   return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
+}
+
+const GitlabUser = z.object({ username: z.string().regex(/^[A-Za-z0-9_.-]+$/), id: z.number().int().positive() })
+const GitlabProject = z.object({
+  path_with_namespace: z.string().regex(/^([A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+$/),
+  permissions: z.object({
+    project_access: z.object({ access_level: z.number() }).nullish(),
+    group_access: z.object({ access_level: z.number() }).nullish(),
+  }),
+})
+/**
+ * Verify the agent's GitLab CLI identity, the configured host, and Developer-or-higher access to the configured project.
+ * Returns undefined while the GitLab Source names no host, repository, or CLI, so deployments that never opted in start as before.
+ */
+export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabAccount | undefined> {
+  const accounts = GitlabAccountsSchema.parse(gitlab ?? {})
+  if (!accounts.host && !accounts.repository && !accounts.cli) return undefined
+  const { stateDir } = machine
+  if (!accounts.host) throw new SetupError('gitlabHostUnset')
+  if (!accounts.repository) throw new SetupError('gitlabRepositoryUnset')
+  if (!accounts.cli) throw new SetupError('gitlabCliUnset')
+  let cli: string
+  try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('gitlabCliMissing', { output: reason(error) }) }
+  const run = (...args: string[]): Promise<string> =>
+    probe(['env', `GITLAB_HOST=${accounts.host}`, cli, ...args]).catch((error: unknown) => { throw new SetupError('gitlabCliFailed', { host: accounts.host, output: reason(error) }) })
+  const agent = parsed(GitlabUser, await run('api', 'user'))
+  if (!agent) throw new SetupError('gitlabCliNoAccount')
+  // Use the canonical project path GitLab returns so renamed or moved projects match incoming events.
+  const projectText = await probe(['env', `GITLAB_HOST=${accounts.host}`, cli, 'api', `projects/${encodeURIComponent(accounts.repository)}`])
+    .catch((error: unknown) => { throw new SetupError('gitlabRepositoryUnreadable', { account: agent.username, repository: accounts.repository, output: reason(error) }) })
+  const project = parsed(GitlabProject, projectText)
+  if (!project) throw new SetupError('gitlabRepositoryUnreported', { repository: accounts.repository })
+  // GitLab grants push at Developer (30) and above; Reporter (20) and below cannot push branches.
+  const level = Math.max(project.permissions.project_access?.access_level ?? 0, project.permissions.group_access?.access_level ?? 0)
+  if (level < 30) throw new SetupError('gitlabRepositoryReadOnly', { account: agent.username, repository: project.path_with_namespace })
+  return { cli, host: accounts.host, repository: project.path_with_namespace, login: agent.username,
+    noreply: `${agent.id}-${agent.username}@noreply.${accounts.host}` }
+}
+
+const PopoAuth = z.object({ ok: z.boolean(), data: z.object({ status: z.string(), uid: z.string().min(3) }) })
+/**
+ * Verify that the configured POPO CLI is signed in and reports an account uid.
+ * Returns undefined while the POPO Source names no CLI, so deployments that never opted in start as before.
+ */
+export async function resolvePopo(machine: Machine, popo: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<PopoBot | undefined> {
+  const { cli: name } = PopoBotSchema.parse(popo ?? {})
+  if (!name) return undefined
+  const fail = (error: unknown): never => { throw error instanceof SetupError ? error : new SetupError('popoCliFailed', { output: reason(error) }) }
+  let cli = ''
+  try { cli = executable(name, path, workerBin(machine.stateDir)) } catch (error) { fail(error) }
+  const text = await probe(['env', 'NO_COLOR=1', cli, 'auth', 'status']).catch(fail)
+  const auth = parsed(PopoAuth, text.slice(text.indexOf('{')))
+  if (!auth || !auth.ok) return fail(new SetupError('popoCliSignedOut', { output: text.slice(0, 400) }))
+  if (auth.data.status !== 'ok') return fail(new SetupError('popoCliSignedOut', { output: auth.data.status }))
+  return { cli, uid: auth.data.uid }
 }

@@ -6,6 +6,7 @@ import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { GitlabRetry } from './sources/gitlab.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -49,10 +50,23 @@ export const KV = {
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
   /**
+   * GitLab Source: todo cursor and pending retries (keyed `issue:<iid>` / `mr:<iid>`); per-Issue/MR note cursor shared by todo
+   * and polled reads; per-stream cursor and start times by kind; default-branch pipeline state; per-MR pipeline fingerprint
+   * and revision.
+   */
+  gitlab: { since: record<string>('gitlab-since'), retries: record<Record<string, GitlabRetry>>('gitlab-retry'),
+    cursor: family<string, [thread: string]>('gitlab-cursor:'),
+    stream: family<{ since: string; started: Record<string, string> }, [stream: string]>('gitlab-stream:'),
+    branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('gitlab-branch-ci'),
+    ci: family<{ fingerprint: string; revision: number }, [thread: string]>('gitlab-ci:') },
+  /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.
    */
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+  /** POPO Source: known sessions mapped to `true` for direct messages; per-session history cursor; per-polled-thread seen message IDs. */
+  popo: { sessions: record<Record<string, boolean>>('popo-sessions'), history: family<string, [session: string]>('popo-history:'),
+    seen: family<string[], [thread: string]>('popo-thread-seen:') },
 }

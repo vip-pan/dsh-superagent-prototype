@@ -1,4 +1,4 @@
-/** Subprocess wrapper for running gh, lark-cli, and git commands under the deployment's configured accounts. */
+/** Subprocess wrapper for running gh, glab, lark-cli, popo-cli, and git commands under the deployment's configured accounts. */
 import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
@@ -65,10 +65,10 @@ export class Commands {
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
-  async run(program: string, args: string[], cwd?: string): Promise<string> {
+  async run(program: string, args: string[], cwd?: string, env?: Record<string, string | undefined>): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...this.environment, ...env, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
@@ -109,6 +109,59 @@ export class Commands {
     const code = result.error?.code
     if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
     return result.data
+  }
+  /** Runs the agent's GitLab CLI (`glab`) against the configured host and parses its JSON output; `glab api` prints raw JSON and has no `--jq`. */
+  async glab<T>(args: string[]): Promise<T> {
+    const account = this.deployment.gitlab
+    if (!account) throw new Error('The GitLab Source has no working CLI')
+    return JSON.parse(await this.run(account.cli, args, undefined, { GITLAB_HOST: account.host })) as T
+  }
+  /**
+   * Runs the agent's `popo-cli popo <tool>` call and returns the envelope's `data` payload.
+   * Node warnings may precede the JSON on stdout, so parsing starts at the first `{`.
+   * @throws CliError carrying the tool's error code and message when the envelope reports failure.
+   */
+  async popo<T>(args: string[]): Promise<T> {
+    const bot = this.deployment.popo
+    if (!bot) throw new Error('The POPO Source has no working CLI')
+    const output = await this.run(bot.cli, ['popo', ...args], undefined, { NO_COLOR: '1', FORCE_COLOR: '0' })
+    const json = output.slice(output.indexOf('{'))
+    const envelope = JSON.parse(json) as { ok?: boolean; code?: string; message?: string; data?: T }
+    if (!envelope.ok) throw new CliError(envelope.message ?? envelope.code ?? 'popo-cli command failed')
+    return envelope.data as T
+  }
+  /**
+   * Calls the GitLab API on a path within the configured project, validating JSON output when a schema is provided
+   * or returning raw CLI output when omitted. `glab api` has no pagination flags, so list callers use `gitlabPages`.
+   * @throws CliError with GitLab's HTTP status as `code` on failure.
+   */
+  async gitlabApi<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
+  async gitlabApi(path: string, ...flags: string[]): Promise<string>
+  async gitlabApi<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
+    if (typeof schema === 'string') return this.glab<string>(['api', this.gitlabPath(schema), ...rest])
+    const [path = '', ...flags] = rest
+    return schema.parse(await this.glab<unknown>(['api', this.gitlabPath(path), ...flags]))
+  }
+  /** Fetches every page of a GitLab API list within the configured project (page-wise; `glab api` has no `--paginate`), skipping items that fail schema validation. */
+  async gitlabPages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
+    const perPage = 100
+    const results: T[] = []
+    const separator = path.includes('?') ? '&' : '?'
+    for (let page = 1; page <= 100; page++) {
+      const batch = validItems(item, z.array(z.unknown()).parse(
+        await this.glab<unknown>(['api', `${this.gitlabPath(path)}${separator}per_page=${perPage}&page=${page}`])), tally)
+      results.push(...batch)
+      if (batch.length < perPage) break
+    }
+    return results
+  }
+  /** Resolves and restricts GitLab API paths to the configured project (`projects/<url-encoded path>`). */
+  private gitlabPath(path: string): string {
+    const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
+    if (outside) throw new Error('GitLab calls are restricted to the configured project')
+    const prefix = `projects/${encodeURIComponent(this.deployment.gitlab?.repository ?? '')}`
+    if (path && path !== prefix && !path.startsWith(`${prefix}/`)) throw new Error('GitLab calls are restricted to the configured project')
+    return path || prefix
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
