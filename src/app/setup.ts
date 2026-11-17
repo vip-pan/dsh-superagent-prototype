@@ -64,10 +64,14 @@ export class Setup {
     const { machine } = this.host
     const probe = this.probe()
     const place = block.slice(7)
+    const github = settings.sources.github?.config ?? {}
+    const gitlab = settings.sources.gitlab?.config ?? {}
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, probe)
-      : block === 'source:gitlab' ? resolveGitlab(machine, settings.sources.gitlab?.config, probe)
+      : block === 'source:gitlab' ? resolveGitlab(machine, gitlab, probe)
       : block === 'source:popo' ? resolvePopo(machine, settings.sources.popo?.config, probe)
-      : resolveDeployment(machine, settings.sources.github?.config, probe)
+      // With no GitHub fields and a GitLab project intended, GitLab alone carries the work repository and its failure is the save's failure.
+      : !github.repository && !github.cli && (gitlab.repository || gitlab.cli || gitlab.host) ? resolveGitlab(machine, gitlab, probe)
+      : resolveDeployment(machine, github, probe)
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === place) throw error })
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
@@ -82,22 +86,35 @@ export class Setup {
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
-    const optional = async <K extends 'feishu' | 'gitlab' | 'popo'>(place: K, resolve: () => Promise<Deployment[K]>): Promise<Deployment[K]> =>
+    const optional = async <K extends 'feishu' | 'popo'>(place: K, resolve: () => Promise<Deployment[K]>): Promise<Deployment[K]> =>
       resolve().catch((error: unknown) => {
         if (!(error instanceof SetupError)) throw error
         if (place === 'feishu') this.feishuProblem = error.problem
-        else if (place === 'gitlab') this.gitlabProblem = error.problem
         else this.popoProblem = error.problem
         context.logger.warn(`dsh-superagent leaves ${place} out: %s`, error.message)
         return undefined as Deployment[K]
       })
-    const [feishu, gitlab, popo] = await Promise.all([
+    // GitLab resolves first: a resolved GitLab project can carry the work repository alone, with no GitHub account at all.
+    const gitlabOutcome = await resolveGitlab(machine, settings.sources.gitlab?.config, probe).then(gitlab => ({ gitlab, error: undefined as SetupError | undefined }), (error: unknown) => {
+      if (!(error instanceof SetupError)) throw error
+      this.gitlabProblem = error.problem
+      context.logger.warn('dsh-superagent leaves gitlab out: %s', error.message)
+      return { gitlab: undefined, error }
+    })
+    const [feishu, popo] = await Promise.all([
       optional('feishu', () => resolveFeishuBot(machine, settings.sources.feishu?.config, probe)),
-      optional('gitlab', () => resolveGitlab(machine, settings.sources.gitlab?.config, probe)),
       optional('popo', () => resolvePopo(machine, settings.sources.popo?.config, probe)),
     ])
-    const resolved = { ...deployment, ...(feishu ? { feishu } : {}), ...(gitlab ? { gitlab } : {}), ...(popo ? { popo } : {}) }
+    const github = settings.sources.github?.config ?? {}
+    const githubSet = Boolean(github.repository || github.cli)
+    const deployment: Deployment = githubSet || !(gitlabOutcome.gitlab || gitlabOutcome.error)
+      ? await resolveDeployment(machine, github, probe)
+      : { ...machine, repository: gitlabOutcome.gitlab?.repository ?? '' }
+    const resolved = { ...deployment, ...(feishu ? { feishu } : {}), ...(gitlabOutcome.gitlab ? { gitlab: gitlabOutcome.gitlab } : {}), ...(popo ? { popo } : {}) }
+    if (!deployment.github && !resolved.gitlab) {
+      // GitLab was intended but unresolved: its failure is the deployment's setup problem.
+      throw gitlabOutcome.error!
+    }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })

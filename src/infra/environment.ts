@@ -98,7 +98,7 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   const run = (program: string, env?: Record<string, string>): string =>
     `${withoutShims}\n${Object.entries(env ?? {}).map(([name, value]) => `export ${name}=${shellQuote(value)}`).join('\n')}\nexec ${shellQuote(program)} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', run(github.cli))
+  await shim('gh', github ? run(github.cli) : fail('gh is unavailable: this installation has no GitHub repository; work through glab instead.'))
   await shim('glab', gitlab ? run(gitlab.cli, { GITLAB_HOST: gitlab.host }) : fail('glab is unavailable: this installation has no GitLab project.'))
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
   await shim('popo-cli', popo ? run(popo.cli, { NO_COLOR: '1', FORCE_COLOR: '0' }) : fail('popo-cli is unavailable: this installation has no POPO account.'))
@@ -111,8 +111,8 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     // Make git refuse to commit without an explicit identity set by the worker instead of guessing from the operator's OS user.
     '[user]', '\tuseConfigOnly = true',
     '[credential]', '\thelper =',
-    '[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
-    '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/',
+    ...(github ? ['[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
+      '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/'] : []),
     ...(gitlab ? ['[credential "https://' + gitlab.host + '"]', `\thelper = ${gitQuote(credentialHelper(gitlab.cli))}`,
       `[url "https://${gitlab.host}/"]`, `\tinsteadOf = git@${gitlab.host}:`, `\tinsteadOf = ssh://git@${gitlab.host}/`] : []),
     // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
@@ -139,12 +139,15 @@ export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[],
   throw new CliError(read(handle.collected.stderr).trim() || `${argv.join(' ')} ${ended}`, undefined, exitCode ?? undefined)
 }
 
-/** Verifies that worker git invocations resolve the deployment's GitHub credential helper. */
-export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
-  const { github, stateDir } = deployment
+/** Verifies that worker git invocations resolve the credential helper of every configured repository host. */
+export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'gitlab' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+  const { github, gitlab, stateDir } = deployment
   // `-z` separates fields with NUL and never quotes paths.
-  const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
-  if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  const helpersOf = async (host: string, cli: string): Promise<string[]> =>
+    (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', `--get-all`, `credential.https://${host}.helper`], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
+  for (const [host, cli] of [...github ? [['github.com', github.cli] as const] : [], ...gitlab ? [[gitlab.host, gitlab.cli] as const] : []]) {
+    if ((await helpersOf(host, cli)).join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  }
 }
 
 /**

@@ -102,7 +102,7 @@ export class Runtime extends Service implements SourceHost {
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const optionalSkills = () => setup.configured()
-        ? (['feishu', 'gitlab', 'popo'] as const).filter(name => setup.deployment[name] !== undefined) : []
+        ? (['github', 'feishu', 'gitlab', 'popo'] as const).filter(name => setup.deployment[name] !== undefined) : []
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, optionalSkills)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
@@ -152,7 +152,7 @@ export class Runtime extends Service implements SourceHost {
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             const { deployment } = setup
-            for (const message of [...pullEndNotices(ended, request, deployment.repository),
+            for (const message of [...deployment.github ? pullEndNotices(ended, request, deployment.repository) : [],
               ...(deployment.gitlab ? mrEndNotices(ended, request, deployment.gitlab) : [])]) outbox.send(message)
           }
         } })
@@ -166,7 +166,7 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
         get gitlabProblem() { return setup.gitlabProblem }, get popoProblem() { return setup.popoProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
-        get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        get github() { return setup.deployment.github ? runtime.context({ kind: 'github', health: ['github'] }) : undefined },
         get gitlab() { return setup.deployment.gitlab ? runtime.context({ kind: 'gitlab', health: ['gitlab'] }) : undefined },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }

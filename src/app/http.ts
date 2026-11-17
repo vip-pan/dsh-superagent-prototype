@@ -101,7 +101,7 @@ function setupView(runtime: HttpHost) {
   return {
     machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
     gitlabProblem: runtime.gitlabProblem ?? null, popoProblem: runtime.popoProblem ?? null,
-    accounts: resolved ? { repository: resolved.repository, agent: resolved.github.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null,
+    accounts: resolved ? { repository: resolved.repository, agent: resolved.github?.login ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null,
       gitlab: resolved.gitlab ? { host: resolved.gitlab.host, repository: resolved.gitlab.repository, account: resolved.gitlab.login } : null,
       popo: resolved.popo ? { account: resolved.popo.uid } : null } : null,
   }

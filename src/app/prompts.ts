@@ -119,8 +119,8 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
 export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }): string {
   return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
 }
-/** Built-in Source skills a deployment can register, in addition to `github`, which is always present. */
-const BUILTIN_SKILLS = ['feishu', 'github', 'gitlab', 'popo'] as const
+/** Built-in Source skills a deployment can register when their Source is configured. */
+const BUILTIN_SKILLS = ['github', 'feishu', 'gitlab', 'popo'] as const
 export function composeSkill(config: PromptConfig, name: string): string {
   return (BUILTIN_SKILLS as readonly string[]).includes(name) ? builtIn(config, `skill/${name}` as PartKey) : config.skills[name] ?? ''
 }
@@ -139,16 +139,16 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => readonly string[]) {
+    private readonly optional: () => readonly string[]) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
     return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
   }
-  /** Returns skills to register in every Session: built-in Source skills (`github` always; the optional Sources only when their account is configured) followed by team skills. */
+  /** Returns skills to register in every Session: the built-in Source skills whose account is configured followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
-    return ['github', ...this.feishu(), ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
+    return [...this.optional(), ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
     const revision = this.versions.revision()

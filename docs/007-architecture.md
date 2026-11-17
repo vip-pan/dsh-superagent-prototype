@@ -280,10 +280,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 - `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings` and `popoSettings`.
 - `src/app/resources.ts` reads the `feishu/`, `github/`, `gitlab/` and `popo/` originals; `src/app/cards.ts` uses `pullOf` and `mrOf` for Ticket cards.
 - Runtime sends `pullEndNotices` and `mrEndNotices` for merged or closed Tickets.
-- Executor tools bind reported pull requests and merge requests with `readPull`/`claimPull` and `readMr`/`claimMr`, using the GitHub context Runtime always exposes and the GitLab context it exposes while GitLab is configured.
+- Executor tools bind reported pull requests and merge requests with `readPull`/`claimPull` and `readMr`/`claimMr`, using the GitHub context Runtime exposes while a GitHub repository is configured and the GitLab context it exposes while GitLab is.
 - MasterAssessor reads repository files with `readRepositoryPath`, and with `readGitlabRepositoryPath` for GitLab Tickets.
-- Sessions and Prompts register built-in skills for GitHub always, and Feishu, GitLab and POPO while their Sources are configured. Migration converts their schema-10 records.
-- Setup probes only GitHub and Feishu account fields (`SETUP_FIELDS`). Only those Sources receive account setup problems through `SourceContext.problem`.
+- Sessions and Prompts register built-in skills for every Source whose account is configured, GitHub included: a deployment whose work repository is a GitLab project alone carries no GitHub skill. Migration converts their schema-10 records.
+- Setup probes the account fields of every Source (`SETUP_FIELDS`). With no GitHub fields and a resolved GitLab project, the GitLab project carries the work repository and no GitHub account is resolved; Sources whose account failed receive their setup problem through `SourceContext.problem`.
 
 
 ## Modules

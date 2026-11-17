@@ -61,7 +61,8 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
 
 export interface Deployment extends Machine {
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  /** The GitHub account of the work repository; absent when a GitLab project alone is configured. */
+  github?: { cli: string; login: string; noreply: string }
   gitlab?: GitlabAccount
   feishu?: FeishuBot
   popo?: PopoBot

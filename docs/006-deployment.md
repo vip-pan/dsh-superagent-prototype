@@ -46,6 +46,29 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
 
+### GitLab project (optional)
+
+The work repository can be a GitLab project instead of GitHub, or GitLab can run beside a GitHub repository in the same installation.
+
+1. Give the agent a GitLab account with at least Developer access (`access_level` 30) to the project, and a `glab` wrapper pinned to the instance:
+
+   ```sh
+   cat > ~/.local/bin/glab-agent <<'EOF'
+   #!/bin/sh
+   GITLAB_HOST=gitlab.example.com exec glab "$@"
+   EOF
+   chmod +x ~/.local/bin/glab-agent
+   glab-agent auth login --hostname gitlab.example.com
+   ```
+
+   Use a wrapper also to isolate the agent's login from a personal one (`GLAB_CONFIG_DIR` points `glab` at a separate configuration).
+
+2. In the panel's Sources, enable the GitLab plugin and set the host (`gitlab.example.com`), the project (`group/name`) and the CLI. Workers reach GitLab through a `glab` shim that carries the host, and git through a credential helper for the host, exactly as GitHub.
+
+3. A GitLab project alone can carry the work repository: leave the GitHub Source's repository and CLI empty and setup resolves GitLab only. The panel's account line then names the GitLab account, the `github` skill is not registered, and workers open merge requests instead of pull requests. When both are configured, GitHub keeps the repository role and GitLab serves as an additional Source.
+
+POPO works the same way through `popo-cli`: set its absolute path (its `bin` may be a version-manager shim that moves between shells), and the Source polls every listened session. GitLab access is verified at Developer level and above; below that, setup reports a read-only project.
+
 ### Feishu bot (optional)
 
 1. Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, and read chat members, then publish the app version.
