@@ -138,41 +138,57 @@ export class Commands {
     if (!envelope.ok) throw new CliError(envelope.message ?? envelope.code ?? 'popo-cli command failed')
     return envelope.data as T
   }
-  /**
-   * Calls the GitLab API on a path within the configured project, validating JSON output when a schema is provided
-   * or returning raw CLI output when omitted. `glab api` has no pagination flags, so list callers use `gitlabPages`.
-   * @throws CliError with GitLab's HTTP status as `code` on failure.
-   */
-  async gitlabApi<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
-  async gitlabApi(path: string, ...flags: string[]): Promise<string>
-  async gitlabApi<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.glab<string>(['api', this.gitlabPath(schema), ...rest])
-    const [path = '', ...flags] = rest
-    return schema.parse(await this.glab<unknown>(['api', this.gitlabPath(path), ...flags]))
-  }
-  /** Fetches every page of a GitLab API list within the configured project (page-wise; `glab api` has no `--paginate`), skipping items that fail schema validation. */
-  async gitlabPages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
-    const perPage = 100
-    const results: T[] = []
-    const separator = path.includes('?') ? '&' : '?'
-    for (let page = 1; page <= 100; page++) {
-      const batch = validItems(item, z.array(z.unknown()).parse(
-        await this.glab<unknown>(['api', `${this.gitlabPath(path)}${separator}per_page=${perPage}&page=${page}`])), tally)
-      results.push(...batch)
-      if (batch.length < perPage) break
+  gitlabProject(project: string): GitlabProject {
+    const prefix = `projects/${encodeURIComponent(project)}`
+    const api = (...args: [z.ZodType<unknown>, string?, ...string[]] | [string, ...string[]]) => {
+      if (typeof args[0] === 'string') {
+        const [path, ...flags] = args as [string, ...string[]]
+        return this.glab<string>(['api', this.gitlabPath(path ? `${prefix}/${path}` : prefix), ...flags])
+      }
+      const [schema, path = '', ...flags] = args as [z.ZodType<unknown>, string, ...string[]]
+      return Promise.resolve(schema.parse(this.glab<unknown>(['api', this.gitlabPath(path ? `${prefix}/${path}` : prefix), ...flags])))
     }
-    return results
+    return {
+      api: api as GitlabProject['api'],
+      pages: async <T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> => {
+        const perPage = 100
+        const results: T[] = []
+        const separator = path.includes('?') ? '&' : '?'
+        for (let page = 1; page <= 100; page++) {
+          const batch = validItems(item, z.array(z.unknown()).parse(
+            await this.glab<unknown>(['api', `${this.gitlabPath(`${prefix}/${path}`)}${separator}per_page=${perPage}&page=${page}`])), tally)
+          results.push(...batch)
+          if (batch.length < perPage) break
+        }
+        return results
+      },
+    }
   }
-  /** Resolves and restricts GitLab API paths: project-relative paths are scoped to the configured project, full `projects/<…>` paths must stay inside it, and only the account-level endpoints the polls need pass through. */
+  /** Resolves and restricts GitLab API paths: account-level endpoints the polls need pass through, and every other call must name a `projects/<…>` path. */
   private gitlabPath(path: string): string {
     const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
-    if (outside) throw new Error('GitLab calls are restricted to the configured project')
+    if (outside) throw new Error('GitLab calls are restricted to configured projects')
     const head = path.split('?')[0] ?? ''
     if (ACCOUNT_ENDPOINTS.has(head)) return path
-    const prefix = `projects/${encodeURIComponent(this.deployment.gitlab?.repository ?? '')}`
-    if (path === prefix || path.startsWith(`${prefix}/`)) return path
-    return path ? `${prefix}/${path}` : prefix
+    if (path === 'projects' || path.startsWith('projects/')) return path
+    throw new Error('GitLab calls must stay within a configured project')
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
 }
+
+/**
+ * The bound `api`/`pages` call pair of one configured GitLab project, as produced by `Commands.gitlabProject()`.
+ * `glab api` prints raw JSON, has no `--jq` and no pagination flags, so list callers use `pages`.
+ * @throws CliError with GitLab's HTTP status as `code` on failure.
+ */
+export interface GitlabProject {
+  /** Calls one configured project's GitLab API path, validating JSON output when a schema is provided or returning raw CLI output when omitted. */
+  api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
+  api(path: string, ...flags: string[]): Promise<string>
+  /** Fetches all pages of one configured project's GitLab API list, skipping items that fail schema validation. */
+  pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]>
+}
+
+/** Shorthand for the call pair bound to one GitLab project. */
+export type GitlabCalls = GitlabProject

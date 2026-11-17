@@ -4,6 +4,7 @@ import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/inde
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import { claimMr, readMr } from '../../sources/gitlab-pull.ts'
+import { gitlabInstanceId } from '../../sources/gitlab-trigger.ts'
 import type { SourceContext } from '../../sources/host.ts'
 import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
@@ -13,7 +14,7 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR; absent while GitHub is unconfigured. */
@@ -91,13 +92,18 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
         if (args.pr_number != null && !host.github) throw new Error('The GitHub Source is not configured; report the work through mr_iid or the summary alone')
         const pull = args.pr_number != null && host.github ? await readPull(host.github, args.pr_number, signal) : undefined
-        if (args.mr_iid != null && !(host.gitlab ?? host.github)) throw new Error('Neither GitLab nor GitHub is configured; report the work through the summary alone')
-        const mr = args.mr_iid != null && (host.gitlab ?? host.github) ? await readMr(host.gitlab ?? host.github!, args.mr_iid, signal) : undefined
+        if (args.mr_iid != null && !host.gitlab) throw new Error('The GitLab Source is not configured; report the work through pr_number or the summary alone')
+        // The MR belongs to the ticket's own GitLab project (its origin trigger's), or the account's default project for chat-originated tickets.
+        const origin = host.store.triggers.get(current.origin.triggerId)
+        const project = typeof origin?.meta.project === 'string' && origin.meta.project ? origin.meta.project : host.gitlab?.deployment.gitlab?.defaultProject
+        if (args.mr_iid != null && !project) throw new Error('This ticket names no GitLab project and the account has no default project; report through the summary alone')
+        const instance = args.mr_iid != null && host.gitlab && project ? { source: gitlabInstanceId(project), project } : undefined
+        const mr = args.mr_iid != null && host.gitlab && instance ? await readMr(host.gitlab, instance, args.mr_iid, signal) : undefined
         // Claim the PR or MR, record the report, and queue the relay atomically so a rejected claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
           const refusedPull = pull && host.github && claimPull(host.github, ticketId, pull)
           if (refusedPull) throw new Error(refusedPull)
-          const refusedMr = mr && (host.gitlab ?? host.github) && claimMr((host.gitlab ?? host.github)!, ticketId, mr)
+          const refusedMr = mr && host.gitlab && instance && claimMr(host.gitlab, ticketId, instance, mr)
           if (refusedMr) throw new Error(refusedMr)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),

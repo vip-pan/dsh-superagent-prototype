@@ -1,4 +1,4 @@
-/** Normalizes GitLab issues, merge requests, notes, and pipeline transitions into domain Triggers. */
+/** Normalizes GitLab issues, merge requests, notes, and pipeline transitions into domain Triggers, keyed by project instance. */
 import { z } from 'zod'
 import { key, type ChannelRef, type Trigger } from '../core/index.ts'
 import { escapeRegExp, sameName } from '../infra/text.ts'
@@ -6,10 +6,18 @@ import { escapeRegExp, sameName } from '../infra/text.ts'
 export const SOURCE = 'gitlab'
 /** A GitLab thread: issues and merge requests have independent `iid` sequences, so the kind prefixes the thread ID. */
 export type GitlabKind = 'issue' | 'mr'
+/** Instance ID of one configured project: `gitlab:<group>~<sub>~<name>` (`~` cannot appear in a GitLab path segment). */
+export const gitlabInstanceId = (repository: string): string => `${SOURCE}:${repository.replaceAll('/', '~')}`
+/** Inverse of `gitlabInstanceId`; undefined for the plain account key or any other kind. */
+export function gitlabRepositoryOf(source: string): string | undefined {
+  if (!source.startsWith(`${SOURCE}:`)) return undefined
+  const name = source.slice(SOURCE.length + 1)
+  return name ? name.split('~').join('/') : undefined
+}
 export const gitlabThread = (kind: GitlabKind, iid: number): string => `${kind}:${iid}`
-/** GitLab reply address: the issue or merge request conversation. */
-export const gitlabChannel = (kind: GitlabKind, iid: number): ChannelRef =>
-  ({ source: SOURCE, thread: `gitlab:${gitlabThread(kind, iid)}`, address: { kind, iid: String(iid) } })
+/** GitLab reply address: the issue or merge request conversation of one project instance. */
+export const gitlabChannel = (source: string, project: string, kind: GitlabKind, iid: number): ChannelRef =>
+  ({ source, thread: `${source}:${gitlabThread(kind, iid)}`, address: { project, kind, iid: String(iid) } })
 /** Parses a web or API URL for an Issue or MR in `repository`; returns undefined for other URLs or projects. */
 export function gitlabAddress(url: string, repository: string): { iid: number; kind: GitlabKind } | undefined {
   const address = /^https?:\/\/([^/]+)\/([^/]+(?:\/[^/]+)*)\/-\/(issues|merge_requests)\/(\d+)/i
@@ -45,6 +53,8 @@ export type GitlabIssue = z.infer<typeof IssueSchema>
 export type GitlabMergeRequest = z.infer<typeof MergeRequestSchema>
 type Opened = Pick<GitlabIssue, 'iid' | 'title' | 'body' | 'author' | 'created_at' | 'web_url'>
 export interface NoteRef { kind: GitlabKind; iid: number; url?: string; mrAuthor?: string }
+/** Identifies the project instance every trigger of one poll belongs to. */
+export interface Instance { source: string; project: string }
 /** True when GitLab reports the account as a regular user rather than a bot. */
 export const isHumanLogin = (user: { username?: string | null }): boolean =>
   !!(user.username ?? '') && !/\(bot\)$|_bot_/i.test(user.username ?? '')
@@ -64,44 +74,50 @@ export const mentions = (text: string, login: string): boolean =>
 const author = (user: { username?: string | null; id?: number }, agent: string) =>
   ({ actor: { source: SOURCE, id: user.username ?? '' }, human: !!(user.username ?? '') && !sameName(user.username ?? '', agent) })
 /** Builds a trigger for a note; system notes (label changes and the like) are skipped by callers. */
-export function noteTrigger(note: GitlabNote, ref: NoteRef, agent: string): Trigger {
+export function noteTrigger(instance: Instance, note: GitlabNote, ref: NoteRef, agent: string): Trigger {
   const at = note.updated_at ?? note.created_at ?? new Date().toISOString()
   const version = note.updated_at ?? ''
-  const id = key('gitlab-note', gitlabThread(ref.kind, ref.iid), String(note.id), version)
-  return { id, source: SOURCE, threads: [{ source: SOURCE, id: gitlabThread(ref.kind, ref.iid) }], ...author(note.author, agent), at,
+  const id = key('gitlab-note', instance.source, gitlabThread(ref.kind, ref.iid), String(note.id), version)
+  return { id, source: instance.source, threads: [{ source: instance.source, id: gitlabThread(ref.kind, ref.iid) }],
+    ...author(note.author, agent), at,
     text: noteText(note),
     ...(mentions(note.body ?? '', agent) ? { addressed: 'mention' as const } : {}),
-    channel: gitlabChannel(ref.kind, ref.iid),
+    channel: gitlabChannel(instance.source, instance.project, ref.kind, ref.iid),
     ...(ref.url ? { url: ref.url } : {}),
-    meta: { kind: ref.kind, iid: ref.iid, ...(ref.kind === 'mr' && ref.mrAuthor ? { mrAuthor: ref.mrAuthor } : {}), noteId: note.id,
+    meta: { kind: ref.kind, iid: ref.iid, project: instance.project, ...(ref.kind === 'mr' && ref.mrAuthor ? { mrAuthor: ref.mrAuthor } : {}),
+      noteId: note.id,
       ...note.position?.new_path || note.position?.old_path
         ? { path: note.position?.new_path ?? note.position?.old_path!, line: note.position?.new_line ?? note.position?.old_line ?? null }
         : {} } }
 }
 /** Builds the trigger for a newly opened Issue's title and description. */
-export function issueTrigger(issue: Opened, agent: string): Trigger {
+export function issueTrigger(instance: Instance, issue: Opened, agent: string): Trigger {
   const body = issue.body ?? ''
-  return { id: key('gitlab-issue', String(issue.iid)), source: SOURCE,
-    threads: [{ source: SOURCE, id: gitlabThread('issue', issue.iid) }], ...author(issue.author, agent), at: issue.created_at,
+  return { id: key('gitlab-issue', instance.source, String(issue.iid)), source: instance.source,
+    threads: [{ source: instance.source, id: gitlabThread('issue', issue.iid) }], ...author(issue.author, agent), at: issue.created_at,
     text: `${issue.title}\n\n${body}`,
     ...(mentions(body, agent) ? { addressed: 'mention' as const } : {}),
-    channel: gitlabChannel('issue', issue.iid), url: issue.web_url, meta: { kind: 'issue', iid: issue.iid } }
+    channel: gitlabChannel(instance.source, instance.project, 'issue', issue.iid), url: issue.web_url,
+    meta: { kind: 'issue', iid: issue.iid, project: instance.project } }
 }
 /** Builds the trigger for a newly opened Merge Request's title and description. */
-export function mrTrigger(mr: Opened & Pick<GitlabMergeRequest, 'source_branch'>, agent: string): Trigger {
-  return { ...issueTrigger(mr, agent), channel: gitlabChannel('mr', mr.iid), url: mr.web_url,
-    meta: { kind: 'mr', iid: mr.iid, ...(mr.author.username ? { mrAuthor: mr.author.username } : {}), ...(mr.source_branch ? { sourceBranch: mr.source_branch } : {}) } }
+export function mrTrigger(instance: Instance, mr: Opened & Pick<GitlabMergeRequest, 'source_branch'>, agent: string): Trigger {
+  return { ...issueTrigger(instance, mr, agent), channel: gitlabChannel(instance.source, instance.project, 'mr', mr.iid), url: mr.web_url,
+    meta: { kind: 'mr', iid: mr.iid, project: instance.project, ...(mr.author.username ? { mrAuthor: mr.author.username } : {}),
+      ...(mr.source_branch ? { sourceBranch: mr.source_branch } : {}) } }
 }
 /** Builds a trigger for a default-branch pipeline transition; branch pipelines have no person to reply to, so they have no `channel`. */
-export function branchCiTrigger(branch: string, sha: string, revision: number, summary: string, url: string): Trigger {
-  return { id: key('gitlab-ci', `branch:${branch}`, String(revision)), source: SOURCE,
-    threads: [{ source: SOURCE, id: `ci:${branch}` }], actor: { source: SOURCE, id: '' }, human: false, at: new Date().toISOString(),
-    text: summary, url, meta: { ci: true, branch, sha, revision } }
+export function branchCiTrigger(instance: Instance, branch: string, sha: string, revision: number, summary: string, url: string): Trigger {
+  return { id: key('gitlab-ci', instance.source, `branch:${branch}`, String(revision)), source: instance.source,
+    threads: [{ source: instance.source, id: `ci:${branch}` }], actor: { source: SOURCE, id: '' }, human: false,
+    at: new Date().toISOString(),
+    text: summary, url, meta: { ci: true, branch, sha, revision, project: instance.project } }
 }
-export function pipelineCiTrigger(mr: Pick<GitlabMergeRequest, 'iid' | 'web_url' | 'author'>, revision: number, summary: string): Trigger {
-  return { id: key('gitlab-ci', gitlabThread('mr', mr.iid), String(revision)), source: SOURCE,
-    threads: [{ source: SOURCE, id: gitlabThread('mr', mr.iid) }],
+export function pipelineCiTrigger(instance: Instance, mr: Pick<GitlabMergeRequest, 'iid' | 'web_url' | 'author'>, revision: number,
+  summary: string): Trigger {
+  return { id: key('gitlab-ci', instance.source, gitlabThread('mr', mr.iid), String(revision)), source: instance.source,
+    threads: [{ source: instance.source, id: gitlabThread('mr', mr.iid) }],
     actor: { source: SOURCE, id: '' }, human: false, at: new Date().toISOString(),
-    text: summary, channel: gitlabChannel('mr', mr.iid), url: mr.web_url,
-    meta: { kind: 'mr', iid: mr.iid, ...(mr.author.username ? { mrAuthor: mr.author.username } : {}), ci: true, revision } }
+    text: summary, channel: gitlabChannel(instance.source, instance.project, 'mr', mr.iid), url: mr.web_url,
+    meta: { kind: 'mr', iid: mr.iid, project: instance.project, ...(mr.author.username ? { mrAuthor: mr.author.username } : {}), ci: true, revision } }
 }

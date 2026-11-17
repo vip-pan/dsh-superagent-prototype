@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, resolveGitlab, resolvePopo, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, resolveGitlab, resolveGitlabProject, resolvePopo, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -104,26 +104,33 @@ describe('GitLab and POPO accounts', () => {
   /** Fake glab signed in as `login` with `level` access (30 = Developer can push) to acme/widgets. */
   const glab = (file: string, login: string, id = 7, level = 30): string => program(file,
     `case "$*" in\n  "api user") echo '{"username":"${login}","id":${id}}' ;;\n  "api projects/acme%2Fwidgets") echo '{"path_with_namespace":"acme/widgets","permissions":{"project_access":{"access_level":${level}}}}' ;;\n  *) exit 1 ;;\nesac`)
-  const config = { host: 'gitlab.acme.test', repository: 'acme/widgets', cli: 'glab' }
-  it('reads the GitLab project and account from glab, canonicalizing the repository path', async () => {
+  const account = { host: 'gitlab.acme.test', cli: 'glab', defaultProject: 'acme/widgets' }
+  it('reads the GitLab account from glab and canonicalizes one project path', async () => {
     glab(join(dir, 'bin', 'glab'), 'Agent-Bot')
-    expect(await resolveGitlab(machine(), config, probe, path)).toEqual({ cli: join(dir, 'bin', 'glab'), host: 'gitlab.acme.test', repository: 'acme/widgets', login: 'Agent-Bot',
-      noreply: '7-Agent-Bot@noreply.gitlab.acme.test' })
+    expect(await resolveGitlab(machine(), account, probe, path)).toEqual({ cli: join(dir, 'bin', 'glab'), host: 'gitlab.acme.test', login: 'Agent-Bot',
+      noreply: '7-Agent-Bot@noreply.gitlab.acme.test', defaultProject: 'acme/widgets' })
     expect(await resolveGitlab(machine(), {}, probe, path)).toBeUndefined()
+    const resolved = await resolveGitlab(machine(), { host: account.host, cli: join(dir, 'bin', 'glab') }, probe, path)
+    expect(await resolveGitlabProject(resolved!, 'acme/widgets', probe)).toBe('acme/widgets')
   })
-  it('names what the GitLab Source needs, refusing accounts that cannot push', async () => {
+  it('names what the GitLab account needs, refusing accounts that cannot sign in', async () => {
     const needs = (code: string, values: Record<string, unknown>, gitlab: unknown) =>
       expect(resolveGitlab(machine(), gitlab, probe, path)).rejects.toEqual(setupError('gitlab', code, values))
-    await needs('gitlabHostUnset', {}, { repository: 'acme/widgets', cli: 'glab' })
-    await needs('gitlabRepositoryUnset', {}, { host: 'gitlab.acme.test', cli: 'glab' })
-    await needs('gitlabCliUnset', {}, { host: 'gitlab.acme.test', repository: 'acme/widgets' })
-    await needs('gitlabCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { ...config, cli: join(dir, 'missing') })
-    await needs('gitlabCliFailed', { host: 'gitlab.acme.test' }, { ...config, cli: program(join(dir, 'bin', 'glab-broken'), 'exit 1') })
-    await needs('gitlabCliNoAccount', {}, { ...config, cli: program(join(dir, 'bin', 'glab-anon'), 'echo "{}"') })
+    await needs('gitlabHostUnset', {}, { cli: 'glab', defaultProject: 'acme/widgets' })
+    await needs('gitlabCliUnset', {}, { host: 'gitlab.acme.test', defaultProject: 'acme/widgets' })
+    await needs('gitlabCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { ...account, cli: join(dir, 'missing') })
+    await needs('gitlabCliFailed', { host: 'gitlab.acme.test' }, { ...account, cli: program(join(dir, 'bin', 'glab-broken'), 'exit 1') })
+    await needs('gitlabCliNoAccount', {}, { ...account, cli: program(join(dir, 'bin', 'glab-anon'), 'echo "{}"') })
+  })
+  it('names what one GitLab project needs, refusing projects that cannot push', async () => {
+    glab(join(dir, 'bin', 'glab'), 'Agent-Bot')
+    const resolved = await resolveGitlab(machine(), { host: account.host, cli: join(dir, 'bin', 'glab') }, probe, path)
+    const needs = (code: string, values: Record<string, unknown>, cli: string) =>
+      expect(resolveGitlabProject({ cli, host: account.host, login: 'Agent-Bot' }, 'acme/widgets', probe)).rejects.toEqual(setupError('gitlab', code, values))
     const unreadable = program(join(dir, 'bin', 'glab-out'), `case "$*" in\n  "api user") echo '{"username":"Agent-Bot","id":7}' ;;\n  *) echo 'glab: 404 Project Not Found (HTTP 404)' >&2; exit 1 ;;\nesac`)
-    await needs('gitlabRepositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output: expect.stringContaining('HTTP 404') }, { ...config, cli: unreadable })
-    await needs('gitlabRepositoryUnreported', { repository: 'acme/widgets' }, { ...config, cli: program(join(dir, 'bin', 'glab-flat'), `case "$*" in\n  "api user") echo '{"username":"Agent-Bot","id":7}' ;;\n  *) echo '{"path_with_namespace":"acme/widgets"}' ;;\nesac`) })
-    await needs('gitlabRepositoryReadOnly', { account: 'Agent-Bot', repository: 'acme/widgets' }, { ...config, cli: glab(join(dir, 'bin', 'glab-reader'), 'Agent-Bot', 7, 20) })
+    await needs('gitlabRepositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output: expect.stringContaining('HTTP 404') }, unreadable)
+    await needs('gitlabRepositoryUnreported', { repository: 'acme/widgets' }, program(join(dir, 'bin', 'glab-flat'), `case "$*" in\n  "api user") echo '{"username":"Agent-Bot","id":7}' ;;\n  *) echo '{"path_with_namespace":"acme/widgets"}' ;;\nesac`))
+    await needs('gitlabRepositoryReadOnly', { account: 'Agent-Bot', repository: 'acme/widgets' }, glab(join(dir, 'bin', 'glab-reader'), 'Agent-Bot', 7, 20))
   })
   it('reads the POPO account from popo-cli, or finds none when the POPO Source names no CLI', async () => {
     const authed = program(join(dir, 'bin', 'popo-cli'), `echo 'node warning on stderr' >&2; echo '{"ok":true,"code":"FABRIC_OK","data":{"status":"ok","uid":"agent@corp.netease.com"}}'`)

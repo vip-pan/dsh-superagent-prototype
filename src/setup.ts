@@ -15,7 +15,6 @@ export const SETUP_PROBLEMS = {
   repositoryUnreported: ['github', 'The agent GitHub CLI did not return {repository}.'],
   repositoryReadOnly: ['github', '@{account} cannot push to {repository}.'],
   gitlabHostUnset: ['gitlab', 'The GitLab Source names no GitLab host.'],
-  gitlabRepositoryUnset: ['gitlab', 'The GitLab Source names no project.'],
   gitlabCliUnset: ['gitlab', 'The agent GitLab CLI is not set.'],
   gitlabCliMissing: ['gitlab', 'The agent GitLab CLI was not found.'],
   gitlabCliFailed: ['gitlab', 'The agent GitLab CLI does not work against {host}.'],

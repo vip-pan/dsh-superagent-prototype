@@ -46,10 +46,12 @@ export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
+/** GitLab account-level Source configuration: one CLI login serves every configured project instance. */
 export const GitlabAccountsSchema = z.object({
   host: z.string().trim().regex(/^([A-Za-z0-9.-]+)?$/, 'GitLab host such as gitlab.example.com').default(''),
-  repository: z.string().trim().regex(/^(([A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)?$/, 'group/subgroup/name').default(''),
   cli: z.string().trim().default(''),
+  /** group/name of the instance that tickets from other Sources (chat) work on; empty falls back to the first instance. */
+  defaultProject: z.string().trim().regex(/^(([A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)?$/, 'group/subgroup/name').default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 export const PopoBotSchema = z.object({ cli: z.string().trim().default('') })
@@ -58,6 +60,8 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   github: Object.keys(GithubAccountsSchema.shape), gitlab: Object.keys(GitlabAccountsSchema.shape),
   feishu: Object.keys(FeishuBotSchema.shape), popo: Object.keys(PopoBotSchema.shape),
 }
+/** Instance-level Source keys that re-check the deployment when changed; the plain kind key stays in SETUP_FIELDS. */
+export const INSTANCE_SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { gitlab: ['repository'] }
 
 export interface Deployment extends Machine {
   repository: string
@@ -67,7 +71,7 @@ export interface Deployment extends Machine {
   feishu?: FeishuBot
   popo?: PopoBot
 }
-export interface GitlabAccount { cli: string; host: string; repository: string; login: string; noreply: string }
+export interface GitlabAccount { cli: string; host: string; login: string; noreply: string; defaultProject: string }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 export interface PopoBot { cli: string; uid: string }
 
@@ -153,15 +157,15 @@ const GitlabProject = z.object({
   }),
 })
 /**
- * Verify the agent's GitLab CLI identity, the configured host, and Developer-or-higher access to the configured project.
- * Returns undefined while the GitLab Source names no host, repository, or CLI, so deployments that never opted in start as before.
+ * Verify the agent's GitLab CLI identity and the configured host.
+ * Returns undefined while the GitLab Source names no host or CLI, so deployments that never opted in start as before.
+ * Per-project access is verified separately for each configured instance by `resolveGitlabProject`.
  */
 export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabAccount | undefined> {
   const accounts = GitlabAccountsSchema.parse(gitlab ?? {})
-  if (!accounts.host && !accounts.repository && !accounts.cli) return undefined
+  if (!accounts.host && !accounts.cli && !accounts.defaultProject) return undefined
   const { stateDir } = machine
   if (!accounts.host) throw new SetupError('gitlabHostUnset')
-  if (!accounts.repository) throw new SetupError('gitlabRepositoryUnset')
   if (!accounts.cli) throw new SetupError('gitlabCliUnset')
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('gitlabCliMissing', { output: reason(error) }) }
@@ -169,16 +173,20 @@ export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Pr
     probe(['env', `GITLAB_HOST=${accounts.host}`, cli, ...args]).catch((error: unknown) => { throw new SetupError('gitlabCliFailed', { host: accounts.host, output: reason(error) }) })
   const agent = parsed(GitlabUser, await run('api', 'user'))
   if (!agent) throw new SetupError('gitlabCliNoAccount')
+  return { cli, host: accounts.host, login: agent.username, noreply: `${agent.id}-${agent.username}@noreply.${accounts.host}`, defaultProject: accounts.defaultProject }
+}
+
+/** Verify Developer-or-higher access to one configured GitLab project; returns its canonical group/subgroup/name path. */
+export async function resolveGitlabProject(account: { cli: string; host: string; login: string }, repository: string, probe: Probe): Promise<string> {
   // Use the canonical project path GitLab returns so renamed or moved projects match incoming events.
-  const projectText = await probe(['env', `GITLAB_HOST=${accounts.host}`, cli, 'api', `projects/${encodeURIComponent(accounts.repository)}`])
-    .catch((error: unknown) => { throw new SetupError('gitlabRepositoryUnreadable', { account: agent.username, repository: accounts.repository, output: reason(error) }) })
+  const projectText = await probe(['env', `GITLAB_HOST=${account.host}`, account.cli, 'api', `projects/${encodeURIComponent(repository)}`])
+    .catch((error: unknown) => { throw new SetupError('gitlabRepositoryUnreadable', { account: account.login, repository, output: reason(error) }) })
   const project = parsed(GitlabProject, projectText)
-  if (!project) throw new SetupError('gitlabRepositoryUnreported', { repository: accounts.repository })
+  if (!project) throw new SetupError('gitlabRepositoryUnreported', { repository })
   // GitLab grants push at Developer (30) and above; Reporter (20) and below cannot push branches.
   const level = Math.max(project.permissions.project_access?.access_level ?? 0, project.permissions.group_access?.access_level ?? 0)
-  if (level < 30) throw new SetupError('gitlabRepositoryReadOnly', { account: agent.username, repository: project.path_with_namespace })
-  return { cli, host: accounts.host, repository: project.path_with_namespace, login: agent.username,
-    noreply: `${agent.id}-${agent.username}@noreply.${accounts.host}` }
+  if (level < 30) throw new SetupError('gitlabRepositoryReadOnly', { account: account.login, repository: project.path_with_namespace })
+  return project.path_with_namespace
 }
 
 const PopoAuth = z.object({ ok: z.boolean(), data: z.object({ status: z.string(), uid: z.string().min(3) }) })

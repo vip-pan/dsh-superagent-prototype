@@ -750,7 +750,6 @@ const TEXT = {
   'setup.feishuUserIdentity': ['机器人的 lark-cli 允许用户身份（strict mode 为 {mode}）；按 docs/006-deployment.md 给机器人一份 strict mode 为 bot 的单独配置。', SETUP_PROBLEMS.feishuUserIdentity[1]],
   'setup.feishuNoBot': ['飞书机器人接口没有返回机器人的 open_id。', SETUP_PROBLEMS.feishuNoBot[1]],
   'setup.gitlabHostUnset': ['GitLab 来源没有设置服务器域名。', SETUP_PROBLEMS.gitlabHostUnset[1]],
-  'setup.gitlabRepositoryUnset': ['GitLab 来源没有设置监听的项目。', SETUP_PROBLEMS.gitlabRepositoryUnset[1]],
   'setup.gitlabCliUnset': ['没有设置智能体的 GitLab CLI。', SETUP_PROBLEMS.gitlabCliUnset[1]],
   'setup.gitlabCliMissing': ['找不到智能体的 GitLab CLI。', SETUP_PROBLEMS.gitlabCliMissing[1]],
   'setup.gitlabCliFailed': ['智能体的 GitLab CLI 在 {host} 上不可用。', SETUP_PROBLEMS.gitlabCliFailed[1]],

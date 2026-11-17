@@ -153,7 +153,7 @@ export class Runtime extends Service implements SourceHost {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             const { deployment } = setup
             for (const message of [...deployment.github ? pullEndNotices(ended, request, deployment.repository) : [],
-              ...(deployment.gitlab ? mrEndNotices(ended, request, deployment.gitlab) : [])]) outbox.send(message)
+              ...(deployment.gitlab ? mrEndNotices(ended, request, deployment.gitlab.host) : [])]) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.

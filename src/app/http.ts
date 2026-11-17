@@ -8,7 +8,7 @@ import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
   from './prompts.ts'
-import { policyVersion } from '../policy.ts'
+import { policyVersion, SOURCE_KEY_REGEX } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
@@ -102,7 +102,7 @@ function setupView(runtime: HttpHost) {
     machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
     gitlabProblem: runtime.gitlabProblem ?? null, popoProblem: runtime.popoProblem ?? null,
     accounts: resolved ? { repository: resolved.repository, agent: resolved.github?.login ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null,
-      gitlab: resolved.gitlab ? { host: resolved.gitlab.host, repository: resolved.gitlab.repository, account: resolved.gitlab.login } : null,
+      gitlab: resolved.gitlab ? { host: resolved.gitlab.host, project: resolved.gitlab.defaultProject, account: resolved.gitlab.login } : null,
       popo: resolved.popo ? { account: resolved.popo.uid } : null } : null,
   }
 }
@@ -149,7 +149,7 @@ const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.litera
   limit: limit(30, 200) })
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
-const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
+const SourceBlock = z.templateLiteral(['source:', z.string().regex(SOURCE_KEY_REGEX)])
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 

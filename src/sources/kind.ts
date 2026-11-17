@@ -82,8 +82,12 @@ export interface TriggerContext {
     signal: AbortSignal): Promise<unknown>
 }
 /** Pluggable source kind descriptor registered with SourceRegistry. */
-export interface SourceKind<C extends Record<string, unknown> = Record<string, unknown>> {
-  /** Stable ID; a default instance with the same ID exists when none is stored. */
+export interface SourceKind<C extends Record<string, unknown> = Record<string, unknown>, I extends Record<string, unknown> = C> {
+  /**
+   * Stable ID; a default instance with the same ID exists when none is stored. With `multi`, the stored keys
+   * `kind:<instance>` each configure one additional instance (such as `gitlab:group~name`), and the plain `kind` key
+   * carries account-level configuration validated by `schema`.
+   */
   kind: string
   title: Localized
   description: Localized
@@ -92,24 +96,35 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   /** Validates stored and submitted configuration and fills defaults. */
   schema: z.ZodType<C>
   fields: FieldSpec[]
+  /**
+   * Marks the kind as multi-instance and validates each `kind:<instance>` entry's configuration. The instance ID after
+   * the colon never contains `:` or `/`; its shape is the kind's own concern (GitLab encodes `group/name` with `~`).
+   */
+  multi?: {
+    schema: z.ZodType<I>
+    fields?: FieldSpec[]
+  }
   /** Health entry names owned by this kind under `health[...]`; no other kind or core loop may report them. */
   health: string[]
-  /** Listening rule for a trigger (or recorded Mandate basis) of this kind; kinds without `scope` listen to everything they produce and observe none of it. */
-  scope?(input: { meta: Record<string, unknown> }, config: C): ScopeResult
+  /** Listening rule for a trigger (or recorded Mandate basis) of this kind, under the probing instance's configuration; kinds without `scope` listen to everything they produce and observe none of it. */
+  scope?(input: { meta: Record<string, unknown> }, config: I): ScopeResult
   /** Outbound reply adapter; kinds without `channel` produce no replies or channel checks. */
-  channel?: SourceChannel<C>
+  channel?: SourceChannel<I>
   /** Bounded context reader for assessments; assessments of a kind without `threadContext` read none. */
-  threadContext?: ThreadContext<C>
-  /** Maps a search query to candidate Thread keys (such as `github:12`) and Trigger search terms (such as a Feishu `om_` ID). */
-  find?(query: string): { threads: string[]; terms: string[] }
+  threadContext?: ThreadContext<I>
+  /**
+   * Maps a search query to candidate Thread keys (such as `github:12`) and Trigger search terms (such as a Feishu `om_` ID).
+   * For multi-instance kinds each configured instance is probed with its own `config`.
+   */
+  find?(query: string, config?: I): { threads: string[]; terms: [] | string[] }
   /** Returns the ID of the Trigger whose message this Trigger replies to, when derivable without a network read. */
   repliesTo?(trigger: Trigger): string | undefined
   /** Policy section for kinds whose senders have their own identity. */
   policy?: SourcePolicyPart<Record<string, unknown> & { allowed: { id: string; name?: string }[] }>
   /** Rereads display names for row keys (such as chat names), stores the resolved names in `KV.sources.labels(kind)`, and returns them. */
   refreshLabels?(host: SourceHost, signal?: AbortSignal): Promise<Record<string, string>>
-  /** Variables the kind registers with the execution environment and how their values are computed. */
-  environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<C>): Record<string, string> }
+  /** Variables the kind registers with the execution environment and how their values are computed; multi-instance kinds receive the ticket's instance configuration. */
+  environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<I>): Record<string, string> }
 }
 
 export interface SourceInstance<C extends Record<string, unknown> = Record<string, unknown>> { id: string; kind: string; enabled: boolean; config: C }

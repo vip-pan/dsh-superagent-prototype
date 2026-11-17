@@ -76,9 +76,11 @@ export const AdmissionRowSchema: z.ZodType<AdmissionRow> = z.object({ listedUnad
 export const AdmissionTableSchema = z.record(z.string(), AdmissionRowSchema)
 export const SourcePolicySchema = z.object({ allowed: z.array(AllowedSchema).default([]), admission: AdmissionTableSchema.default({}) }).catchall(z.unknown())
 export type SourcePolicy = z.infer<typeof SourcePolicySchema>
+/** A Source settings key: a plain kind such as `github`, or an instance-qualified id such as `gitlab:group~name`. */
+export const SOURCE_KEY_REGEX = /^[a-z][a-z0-9-]*(:[A-Za-z0-9_.~-]+)?$/
 export const PolicyConfigSchema = z.object({
   rules: z.array(RuleSchema).refine(rules => new Set(rules.map(rule => rule.id)).size === rules.length, 'Duplicate rule IDs').default(DEFAULT_RULES),
-  sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourcePolicySchema).default({}),
+  sources: z.record(z.string().regex(SOURCE_KEY_REGEX), SourcePolicySchema).default({}),
 }).strict()
 export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
@@ -96,13 +98,53 @@ export const ExecutorConfigSchema = z.object({
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
-export const SettingsSchema = z.object({
+/**
+ * Split a pre-multi-instance GitLab Source (config carried `repository`, `pollSeconds` and observe flags) into the
+ * account entry `gitlab` plus one instance entry `gitlab:<group>~<name>`, and move the matching policy part.
+ * Idempotent: once no `sources.gitlab.config.repository` remains, the input passes through untouched.
+ */
+export function splitLegacyGitlab<T>(data: T): T {
+  if (typeof data !== 'object' || data === null) return data
+  const clone: Record<string, unknown> = { ...(data as Record<string, unknown>) }
+  const sources = clone.sources
+  const policy = clone.policy
+  if (typeof sources === 'object' && sources !== null && !Object.keys(sources).some(k => k.startsWith('gitlab:'))) {
+    const gitlab = (sources as Record<string, unknown>).gitlab
+    if (typeof gitlab === 'object' && gitlab !== null) {
+      const raw = (gitlab as Record<string, unknown>).config
+      const config = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : undefined
+      const repository = typeof config?.repository === 'string' ? config.repository.trim() : ''
+      if (repository && config) {
+        const instanceId = `gitlab:${repository.replaceAll('/', '~')}`
+        // The account keeps host, cli, and the account-level failure threshold; the instance takes project and polling fields.
+        const { repository: _drop, pollSeconds, observeIssues, observeMrs, observeComments, observePipelines, ...account } =
+          config
+        const instances = (sources as Record<string, unknown>)
+        instances.gitlab = { ...(gitlab as Record<string, unknown>), config: { ...account, defaultProject: repository } }
+        instances[instanceId] = { enabled: true, config: { repository, ...pollSeconds !== undefined ? { pollSeconds } : {},
+          ...observeIssues !== undefined ? { observeIssues } : {}, ...observeMrs !== undefined ? { observeMrs } : {},
+          ...observeComments !== undefined ? { observeComments } : {}, ...observePipelines !== undefined ? { observePipelines } : {} } }
+        if (typeof policy === 'object' && policy !== null) {
+          const parts = (policy as Record<string, unknown>).sources
+          if (typeof parts === 'object' && parts !== null && 'gitlab' in parts && !(instanceId in parts)) {
+            const moved = { ...(parts as Record<string, unknown>) }
+            moved[instanceId] = moved.gitlab
+            delete moved.gitlab
+            ;(policy as Record<string, unknown>).sources = moved
+          }
+        }
+      }
+    }
+  }
+  return clone as T
+}
+export const SettingsSchema = z.preprocess(splitLegacyGitlab, z.object({
   paused: z.boolean().default(false),
-  sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
+  sources: z.record(z.string().regex(SOURCE_KEY_REGEX), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
-}).strict()
+}).strict())
 export type Settings = z.infer<typeof SettingsSchema>
 export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'

@@ -50,14 +50,15 @@ export const KV = {
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
   /**
-   * GitLab Source: todo cursor and pending retries (keyed `issue:<iid>` / `mr:<iid>`); per-Issue/MR note cursor shared by todo
-   * and polled reads; per-stream cursor and start times by kind; default-branch pipeline state; per-MR pipeline fingerprint
-   * and revision.
+   * GitLab Source (multi-instance): per-instance todo cursor (`since`, keyed by instance ID); pending retries (keyed
+   * `<instance>:issue:<iid>` / `<instance>:mr:<iid>`); per-Issue/MR note cursor (keyed `<instance>:<kind>:<iid>`);
+   * per-instance per-stream cursor and start times by kind; per-instance default-branch pipeline state; per-MR pipeline
+   * fingerprint and revision (keyed `<instance>:mr:<iid>`).
    */
-  gitlab: { since: record<string>('gitlab-since'), retries: record<Record<string, GitlabRetry>>('gitlab-retry'),
+  gitlab: { since: family<string, [instance: string]>('gitlab-since:'), retries: record<Record<string, GitlabRetry>>('gitlab-retry'),
     cursor: family<string, [thread: string]>('gitlab-cursor:'),
     stream: family<{ since: string; started: Record<string, string> }, [stream: string]>('gitlab-stream:'),
-    branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('gitlab-branch-ci'),
+    branchCi: family<{ branch?: string; failures?: string[]; revision: number }, [instance: string]>('gitlab-branch-ci:'),
     ci: family<{ fingerprint: string; revision: number }, [thread: string]>('gitlab-ci:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID

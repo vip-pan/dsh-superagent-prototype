@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, resolveGitlab, resolvePopo, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { INSTANCE_SETUP_FIELDS, SETUP_FIELDS, resolveDeployment, resolveFeishuBot, resolveGitlab, resolveGitlabProject, resolvePopo, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -13,8 +13,13 @@ export interface SetupHost {
   restart(): void
 }
 
+/** Account fields of every kind plus instance-level fields (such as each GitLab instance's project) drive re-checks and restarts. */
 const setupFields = (settings: Settings) =>
-  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
+  JSON.stringify([Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')),
+    Object.entries(settings.sources).filter(([id]) => id.includes(':')).map(([id, value]) => {
+      const keys = INSTANCE_SETUP_FIELDS[id.slice(0, id.indexOf(':'))] ?? []
+      return keys.map(key => value.config[key] ?? '')
+    })])
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
 
 /**
@@ -66,13 +71,31 @@ export class Setup {
     const place = block.slice(7)
     const github = settings.sources.github?.config ?? {}
     const gitlab = settings.sources.gitlab?.config ?? {}
+    // One GitLab instance's project access; `only` restricts the check to that instance's block save.
+    const checkGitlabProjects = async (only?: string): Promise<void> => {
+      const account = await resolveGitlab(machine, gitlab, probe)
+      if (!account) return
+      for (const [id, value] of Object.entries(settings.sources)) {
+        if (!id.startsWith('gitlab:') || (only !== undefined && id !== only) || value.enabled === false) continue
+        const repository = typeof value.config.repository === 'string' ? value.config.repository : ''
+        if (repository) await resolveGitlabProject(account, repository, probe)
+      }
+    }
+    const gitlabIntended = Boolean(gitlab.host || gitlab.cli || gitlab.defaultProject)
+      || Object.keys(settings.sources).some(id => id.startsWith('gitlab:'))
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, probe)
       : block === 'source:gitlab' ? resolveGitlab(machine, gitlab, probe)
       : block === 'source:popo' ? resolvePopo(machine, settings.sources.popo?.config, probe)
-      // With no GitHub fields and a GitLab project intended, GitLab alone carries the work repository and its failure is the save's failure.
-      : !github.repository && !github.cli && (gitlab.repository || gitlab.cli || gitlab.host) ? resolveGitlab(machine, gitlab, probe)
+      // A GitLab instance block re-checks its own project; account errors also belong to it.
+      : place.startsWith('gitlab:') ? checkGitlabProjects(place)
+      // With no GitHub fields and GitLab intended, GitLab alone carries the work repository and its failure is the save's failure.
+      : !github.repository && !github.cli && gitlabIntended ? checkGitlabProjects()
       : resolveDeployment(machine, github, probe)
-    await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === place) throw error })
+    // Account-level SetupErrors of the saved GitLab instance block also belong to it, so they fail the save.
+    await check.catch((error: unknown) => {
+      if (error instanceof SetupError && error.place !== place && !(place.startsWith('gitlab:') && error.place === 'gitlab')) return
+      throw error
+    })
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)
@@ -95,12 +118,29 @@ export class Setup {
         return undefined as Deployment[K]
       })
     // GitLab resolves first: a resolved GitLab project can carry the work repository alone, with no GitHub account at all.
-    const gitlabOutcome = await resolveGitlab(machine, settings.sources.gitlab?.config, probe).then(gitlab => ({ gitlab, error: undefined as SetupError | undefined }), (error: unknown) => {
+    let gitlabOutcome = await resolveGitlab(machine, settings.sources.gitlab?.config, probe).then(gitlab => ({ gitlab, error: undefined as SetupError | undefined }), (error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.gitlabProblem = error.problem
       context.logger.warn('dsh-superagent leaves gitlab out: %s', error.message)
       return { gitlab: undefined, error }
     })
+    // Every enabled GitLab instance's project access is part of setup: an unreadable project degrades to gitlabProblem
+    // (and blocks setup outright when no GitHub repository backs the deployment).
+    if (gitlabOutcome.gitlab) {
+      for (const [id, value] of Object.entries(settings.sources)) {
+        if (!id.startsWith('gitlab:') || value.enabled === false) continue
+        const repository = typeof value.config.repository === 'string' ? value.config.repository : ''
+        if (!repository) continue
+        try { await resolveGitlabProject(gitlabOutcome.gitlab, repository, probe) }
+        catch (error) {
+          if (!(error instanceof SetupError)) throw error
+          this.gitlabProblem = error.problem
+          context.logger.warn('dsh-superagent leaves gitlab out: instance %s: %s', id, error.message)
+          gitlabOutcome = { gitlab: undefined, error }
+          break
+        }
+      }
+    }
     const [feishu, popo] = await Promise.all([
       optional('feishu', () => resolveFeishuBot(machine, settings.sources.feishu?.config, probe)),
       optional('popo', () => resolvePopo(machine, settings.sources.popo?.config, probe)),
@@ -109,7 +149,7 @@ export class Setup {
     const githubSet = Boolean(github.repository || github.cli)
     const deployment: Deployment = githubSet || !(gitlabOutcome.gitlab || gitlabOutcome.error)
       ? await resolveDeployment(machine, github, probe)
-      : { ...machine, repository: gitlabOutcome.gitlab?.repository ?? '' }
+      : { ...machine, repository: gitlabOutcome.gitlab?.defaultProject ?? '' }
     const resolved = { ...deployment, ...(feishu ? { feishu } : {}), ...(gitlabOutcome.gitlab ? { gitlab: gitlabOutcome.gitlab } : {}), ...(popo ? { popo } : {}) }
     if (!deployment.github && !resolved.gitlab) {
       // GitLab was intended but unresolved: its failure is the deployment's setup problem.

@@ -31,6 +31,7 @@ export interface SetupState {
 }
 export const problemOf = (id: string, setup: SetupState) =>
   [setup.problem, setup.feishuProblem, setup.gitlabProblem, setup.popoProblem].find(problem => problem?.place === id)
+    ?? [setup.gitlabProblem].find(problem => problem && id.startsWith('gitlab:'))
 /** Source lifecycle state in priority order: missing kind, disabled, setup/part error, blocked on global setup, starting, paused, or ready. */
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
 function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {
