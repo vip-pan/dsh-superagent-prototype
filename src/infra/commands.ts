@@ -140,13 +140,15 @@ export class Commands {
   }
   gitlabProject(project: string): GitlabProject {
     const prefix = `projects/${encodeURIComponent(project)}`
-    const api = (...args: [z.ZodType<unknown>, string?, ...string[]] | [string, ...string[]]) => {
+    // Account-level endpoints (todos, user) exist only at the account root, so they skip the project prefix.
+    const route = (path: string) => this.gitlabPath(ACCOUNT_ENDPOINTS.has(path.split('?')[0] ?? '') ? path : path ? `${prefix}/${path}` : prefix)
+    const api = async (...args: [z.ZodType<unknown>, string?, ...string[]] | [string, ...string[]]) => {
       if (typeof args[0] === 'string') {
         const [path, ...flags] = args as [string, ...string[]]
-        return this.glab<string>(['api', this.gitlabPath(path ? `${prefix}/${path}` : prefix), ...flags])
+        return this.glab<string>(['api', route(path), ...flags])
       }
       const [schema, path = '', ...flags] = args as [z.ZodType<unknown>, string, ...string[]]
-      return Promise.resolve(schema.parse(this.glab<unknown>(['api', this.gitlabPath(path ? `${prefix}/${path}` : prefix), ...flags])))
+      return schema.parse(await this.glab<unknown>(['api', route(path), ...flags]))
     }
     return {
       api: api as GitlabProject['api'],
@@ -156,7 +158,7 @@ export class Commands {
         const separator = path.includes('?') ? '&' : '?'
         for (let page = 1; page <= 100; page++) {
           const batch = validItems(item, z.array(z.unknown()).parse(
-            await this.glab<unknown>(['api', `${this.gitlabPath(`${prefix}/${path}`)}${separator}per_page=${perPage}&page=${page}`])), tally)
+            await this.glab<unknown>(['api', `${route(path)}${separator}per_page=${perPage}&page=${page}`])), tally)
           results.push(...batch)
           if (batch.length < perPage) break
         }

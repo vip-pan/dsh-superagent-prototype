@@ -29,6 +29,17 @@ describe('account-isolated operations', () => {
       expect(output).not.toContain('GH_TOKEN=')
     } finally { delete process.env.GH_TOKEN }
   })
+  it('binds GitLab calls to one project, except the account endpoints', async () => {
+    const local = testDeployment({ gitlab: { cli: '/path/agent-glab', host: 'gitlab.acme.test', login: 'Agent-Bot', noreply: '7-Agent-Bot@noreply.gitlab.acme.test', defaultProject: 'apc/server/ape' } })
+    const commands = new Commands(() => local, {}, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run').mockResolvedValue('[]')
+    const calls = commands.gitlabProject('apc/server/ape')
+    await calls.api(z.array(z.unknown()), 'issues?state=all')
+    await calls.pages(z.object({ id: z.number() }), 'todos')
+    await expect(calls.api(z.unknown(), '../outside')).rejects.toThrow()
+    expect(run.mock.calls[0]![1]).toEqual(['api', 'projects/apc%2Fserver%2Fape/issues?state=all'])
+    expect(run.mock.calls[1]![1]).toEqual(['api', 'todos?per_page=100&page=1'])
+  })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
     await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')
   })

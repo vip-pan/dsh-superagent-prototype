@@ -29,7 +29,7 @@ it('answers each kind of failure with its own status', async () => {
   const saves: unknown[] = []
   const call = serve({
     store: { tickets: { get: () => undefined }, blockRevision: () => 0 },
-    sources: { instances: () => [{ id: 'github' }] },
+    sources: { instances: () => [{ id: 'github' }], kind: () => undefined },
     settings: { save: async (...args: unknown[]) => {
       saves.push(args)
       if (args[1] === 'stale') throw new SettingsConflict('Settings changed. Reload before saving.')

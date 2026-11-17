@@ -101,7 +101,9 @@ export const gitlabKind: SourceKind<GitlabAccountConfig, GitlabInstanceConfig> =
       columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9_.\\-]+' }] }],
     explicit: { zh: '名单里的账号在 Issue 或评论里 @ 智能体的账号。', en: 'An account on the list mentions the agent\'s account in an Issue or a comment.' },
     rows(stored) {
-      const config = GitlabInstanceSchema.partial().parse(stored)
+      // The account card's stored config carries account keys, so read the observation flags leniently.
+      const parsed = GitlabInstanceSchema.partial().loose().safeParse(stored)
+      const config: Partial<GitlabInstanceConfig> = parsed.success ? parsed.data : {}
       const note = (observed: boolean | undefined) => observed ? { zh: '全部', en: 'All' } : { zh: '仅 @', en: '@ only' }
       const row = (id: Scope, label: { zh: string; en: string }) => ({ id, label, note: note(config[OBSERVED[id]]),
         cells: { listedUnaddressed: !!config[OBSERVED[id]], unlistedAddressed: true, unlistedUnaddressed: !!config[OBSERVED[id]] } })
@@ -163,6 +165,8 @@ async function watch(account: SourceContext, host: SourceHost, signal: AbortSign
   }
   const stored = host.sources.instanceIds(SOURCE)
   if (!stored.length) { account.report(SOURCE, health('paused', 'sourceOff')); return }
+  // The account entry itself only reports this summary; each instance reports its own rounds.
+  account.report(SOURCE, { state: 'ready', detail: `${stored.length} project${stored.length > 1 ? 's' : ''}` })
   // One loop per stored instance. Instances join and leave only through setup restarts, so the set is fixed for this run.
   await Promise.all(stored.map(id => watchInstance(account, host, id, signal)))
 }

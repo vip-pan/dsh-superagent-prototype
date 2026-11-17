@@ -15,7 +15,7 @@ import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health } from '../sources/host.ts'
-import type { SourceRegistry } from '../sources/registry.ts'
+import { sourceKey, type SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
@@ -200,7 +200,13 @@ function routes(runtime: HttpHost): Routes {
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
-      const known = !block.startsWith('source:') || runtime.sources.instances().some(instance => `source:${instance.id}` === block)
+      const known = !block.startsWith('source:') || (() => {
+        if (runtime.sources.instances().some(instance => `source:${instance.id}` === block)) return true
+        // A stored-or-default instance exists; beyond those, any instance key of a multi-instance kind can be created here.
+        const { kind, name } = sourceKey(block.slice('source:'.length))
+        const declared = runtime.sources.kind(kind)
+        return !!declared?.multi && !!name
+      })()
       if (!known) throw new RouteError(404, 'Source not found')
       const request = SaveRequest.parse(await body())
       return runtime.settings.save(block, request.value, request.revision, 'panel')
