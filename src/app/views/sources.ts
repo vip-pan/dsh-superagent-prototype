@@ -13,11 +13,17 @@ export type HealthMap = Record<string, Health>
 export function sourceHealth(sources: SourceRegistry, instance: SourceInstance, health: HealthMap) {
   const kind = sources.kind(instance.kind)
   const starting: Health = { state: 'starting', detail: '' }
-  const parts = (kind?.health ?? []).map(name => {
+  // A multi-instance kind's instance card reports its own entry; the kind's entries belong to the account card.
+  const own = kind?.multi && instance.id.includes(':')
+  const names = own ? [instance.id] : kind?.health ?? []
+  const parts = names.map(name => {
     const entry = health[name]
     return { name, ...(!entry || (instance.enabled && entry.code === 'sourceOff') ? starting : entry) }
   })
-  return { id: instance.id, title: kind?.title ?? { zh: instance.id, en: instance.id }, health: parts }
+  // Instance cards name their project, as in GitLab · apc-server.
+  const title = kind?.title ?? { zh: instance.id, en: instance.id }
+  const project = own && instance.id.includes('~') ? instance.id.slice(instance.id.lastIndexOf('~') + 1) : ''
+  return { id: instance.id, title: project ? { zh: `${title.zh} · ${project}`, en: `${title.en} · ${project}` } : title, health: parts }
 }
 export interface SetupState {
   /** Resolved deployment facts; undefined while waiting for initial setup. */
