@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveFeishuBot, resolveGithub, resolveGithubRepository, resolveGitlab, resolveGitlabProject, resolvePopo, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -57,30 +57,33 @@ describe('configuration schema', () => {
 })
 
 describe('setup', () => {
-  it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
-    const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
-    expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
-    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
-    expect(deployment).not.toHaveProperty('feishu')
-    // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
-    expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+  it('reads the GitHub account from its CLI, skipping the worker shims, or finds none when the GitHub Source names no CLI', async () => {
+    const github = await resolveGithub(machine(), { cli: 'gh' }, probe, path)
+    expect(github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
+    expect(await resolveGithub(machine(), {}, probe, path)).toBeUndefined()
+    expect(await resolveGithub(machine(), undefined, probe, path)).toBeUndefined()
+    // Repositories verify separately: a renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
+    expect(await resolveGithubRepository(github!, 'acme/widgets', probe)).toBe('acme/widgets')
+    expect(await resolveGithubRepository(github!, 'acme/gadgets', probe)).toBe('acme/widgets')
   })
-  it('names what setup needs and where it is set', async () => {
-    const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
-      expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
-    const repository = 'acme/widgets'
-    await needs('github', 'repositoryUnset', {}, { cli: 'gh' })
-    await needs('github', 'agentCliUnset', {}, { repository })
-    await needs('github', 'agentCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { repository, cli: join(dir, 'missing') })
-    await needs('github', 'agentCliMissing', { output: 'bin/gh must be a command name or an absolute path' }, { repository, cli: 'bin/gh' })
-    await needs('github', 'agentCliSignedOut', {}, { repository, cli: program(join(dir, 'bin', 'gh-broken'), 'exit 1') })
-    await needs('github', 'repositoryReadOnly', { account: 'Agent-Bot', repository: 'acme/widgets' }, { repository, cli: gh(join(dir, 'bin', 'gh-reader'), 'Agent-Bot', false) })
-    // Signed in, but the account cannot read the repository, or the CLI names no account.
+  it('names what the GitHub account and each repository need and where it is set', async () => {
+    const account = (cli: string) => ({ cli })
+    const needs = (code: string, values: Record<string, unknown>, github: unknown) =>
+      expect(resolveGithub(machine(), github, probe, path)).rejects.toEqual(setupError('github', code, values))
+    await needs('agentCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, account(join(dir, 'missing')))
+    await needs('agentCliMissing', { output: 'bin/gh must be a command name or an absolute path' }, account('bin/gh'))
+    await needs('agentCliSignedOut', {}, account(program(join(dir, 'bin', 'gh-broken'), 'exit 1')))
+    await needs('agentCliNoAccount', {}, account(program(join(dir, 'bin', 'gh-anonymous'), `echo '{}'`)))
+    const repositoryNeeds = (code: string, values: Record<string, unknown>, cli: string, repository = 'acme/widgets') =>
+      expect(resolveGithubRepository({ cli, login: 'Agent-Bot' }, repository, probe)).rejects.toEqual(setupError('github', code, values))
+    await repositoryNeeds('repositoryUnset', {}, join(dir, 'bin', 'gh'), '')
+    await repositoryNeeds('repositoryReadOnly', { account: 'Agent-Bot', repository: 'acme/widgets' }, gh(join(dir, 'bin', 'gh-reader'), 'Agent-Bot', false))
+    // Signed in, but the account cannot read the repository.
     const unreadable = program(join(dir, 'bin', 'gh-outsider'),
       `case "$*" in\n  "api user") echo '{"login":"Agent-Bot","id":7}' ;;\n  *) echo 'HTTP 404' >&2; exit 1 ;;\nesac`)
     const output = expect.stringContaining('HTTP 404') as unknown
-    await needs('github', 'repositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output }, { repository, cli: unreadable })
-    await needs('github', 'agentCliNoAccount', {}, { repository, cli: program(join(dir, 'bin', 'gh-anonymous'), `echo '{}'`) })
+    await repositoryNeeds('repositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output }, unreadable)
+    await repositoryNeeds('repositoryUnreported', { repository: 'acme/widgets' }, program(join(dir, 'bin', 'gh-flat'), `echo '{}'`))
     expect(() => executable('nothing-here', join(dir, 'bin'))).toThrow('nothing-here is not an executable file on PATH')
   })
   it('reads the Feishu bot from a bot-only lark-cli, or finds none when the Feishu Source names no CLI', async () => {
@@ -97,5 +100,49 @@ describe('setup', () => {
     await refuses('feishuNoBot')
     program(join(dir, 'bin', 'lark-cli'), 'echo "not configured" >&2; exit 1')
     await refuses('feishuCliFailed', { output: expect.stringContaining('not configured') })
+  })
+})
+
+describe('GitLab and POPO accounts', () => {
+  /** Fake glab signed in as `login` with `level` access (30 = Developer can push) to acme/widgets. */
+  const glab = (file: string, login: string, id = 7, level = 30): string => program(file,
+    `case "$*" in\n  "api user") echo '{"username":"${login}","id":${id}}' ;;\n  "api projects/acme%2Fwidgets") echo '{"path_with_namespace":"acme/widgets","permissions":{"project_access":{"access_level":${level}}}}' ;;\n  *) exit 1 ;;\nesac`)
+  const account = { host: 'gitlab.acme.test', cli: 'glab' }
+  it('reads the GitLab account from glab and canonicalizes one project path', async () => {
+    glab(join(dir, 'bin', 'glab'), 'Agent-Bot')
+    expect(await resolveGitlab(machine(), account, probe, path)).toEqual({ cli: join(dir, 'bin', 'glab'), host: 'gitlab.acme.test', login: 'Agent-Bot',
+      noreply: '7-Agent-Bot@noreply.gitlab.acme.test' })
+    expect(await resolveGitlab(machine(), {}, probe, path)).toBeUndefined()
+    const resolved = await resolveGitlab(machine(), { host: account.host, cli: join(dir, 'bin', 'glab') }, probe, path)
+    expect(await resolveGitlabProject(resolved!, 'acme/widgets', probe)).toBe('acme/widgets')
+  })
+  it('names what the GitLab account needs, refusing accounts that cannot sign in', async () => {
+    const needs = (code: string, values: Record<string, unknown>, gitlab: unknown) =>
+      expect(resolveGitlab(machine(), gitlab, probe, path)).rejects.toEqual(setupError('gitlab', code, values))
+    await needs('gitlabHostUnset', {}, { cli: 'glab' })
+    await needs('gitlabCliUnset', {}, { host: 'gitlab.acme.test' })
+    await needs('gitlabCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { ...account, cli: join(dir, 'missing') })
+    await needs('gitlabCliFailed', { host: 'gitlab.acme.test' }, { ...account, cli: program(join(dir, 'bin', 'glab-broken'), 'exit 1') })
+    await needs('gitlabCliNoAccount', {}, { ...account, cli: program(join(dir, 'bin', 'glab-anon'), 'echo "{}"') })
+  })
+  it('names what one GitLab project needs, refusing projects that cannot push', async () => {
+    glab(join(dir, 'bin', 'glab'), 'Agent-Bot')
+    const resolved = await resolveGitlab(machine(), { host: account.host, cli: join(dir, 'bin', 'glab') }, probe, path)
+    const needs = (code: string, values: Record<string, unknown>, cli: string) =>
+      expect(resolveGitlabProject({ cli, host: account.host, login: 'Agent-Bot' }, 'acme/widgets', probe)).rejects.toEqual(setupError('gitlab', code, values))
+    const unreadable = program(join(dir, 'bin', 'glab-out'), `case "$*" in\n  "api user") echo '{"username":"Agent-Bot","id":7}' ;;\n  *) echo 'glab: 404 Project Not Found (HTTP 404)' >&2; exit 1 ;;\nesac`)
+    await needs('gitlabRepositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output: expect.stringContaining('HTTP 404') }, unreadable)
+    await needs('gitlabRepositoryUnreported', { repository: 'acme/widgets' }, program(join(dir, 'bin', 'glab-flat'), `case "$*" in\n  "api user") echo '{"username":"Agent-Bot","id":7}' ;;\n  *) echo '{"path_with_namespace":"acme/widgets"}' ;;\nesac`))
+    await needs('gitlabRepositoryReadOnly', { account: 'Agent-Bot', repository: 'acme/widgets' }, glab(join(dir, 'bin', 'glab-reader'), 'Agent-Bot', 7, 20))
+  })
+  it('reads the POPO robot account from the popo-robot CLI, or finds none when the POPO Source names no CLI', async () => {
+    const cli = (name: string, body: string) => program(join(dir, 'bin', name), body)
+    const ok = cli('popo-robot', 'echo \'{"robotUid":"robot@app.robot.popo.com","appKey":"k"}\'')
+    expect(await resolvePopo(machine(), { cli: ok }, probe, path)).toEqual({ cli: ok, uid: 'robot@app.robot.popo.com' })
+    expect(await resolvePopo(machine(), {}, probe, path)).toBeUndefined()
+    const needs = (code: string, values: Record<string, unknown>, popo: unknown) => expect(resolvePopo(machine(), popo, probe, path)).rejects.toEqual(setupError('popo', code, values))
+    await needs('popoCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { cli: join(dir, 'missing') })
+    await needs('popoCliFailed', {}, { cli: cli('popo-broken', 'echo "no credentials" >&2; exit 3') })
+    await needs('popoNoAccount', {}, { cli: cli('popo-anon', 'echo \'{"robotUid":""}\'') })
   })
 })

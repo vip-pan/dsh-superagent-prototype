@@ -4,7 +4,7 @@ import { CliError, Commands, commandError } from '../src/infra/commands.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { githubKind } from '../src/sources/github.ts'
-import { githubChannel } from '../src/sources/github-trigger.ts'
+import { githubChannel, githubInstanceId } from '../src/sources/github-trigger.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { key, type OutboundMessage } from '../src/core/index.ts'
@@ -12,9 +12,17 @@ import { testDeployment } from './fixtures/deployment.ts'
 const sources = new SourceRegistry(() => SettingsSchema.parse({}))
 sources.register(feishuKind); sources.register(githubKind)
 const send = (commands: Commands, message: OutboundMessage) => sources.send(message, commands)
-const deployment = testDeployment({ github: { ...testDeployment().github, cli: '/path/agent-gh' } })
-const REPOSITORY = deployment.repository
-const reply = { id: 'stable-operation', channel: githubChannel(8), text: 'Done', kind: 'reply' as const }
+const deployment = testDeployment({ github: { ...testDeployment().github!, cli: '/path/agent-gh' } })
+const REPOSITORY = 'acme/widgets'
+const instance = { source: githubInstanceId(REPOSITORY), repository: REPOSITORY }
+const reply = { id: 'stable-operation', channel: githubChannel(instance, 8), text: 'Done', kind: 'reply' as const }
+/** Replaces the pages of every repository `commands` binds with `items`, leaving its `api` and the `gh` calls it makes real; returns the `pages` mock. */
+const stubPages = (commands: Commands, items: unknown[] = []) => {
+  const pages = vi.fn(async () => items)
+  const bind = commands.githubRepository.bind(commands)
+  vi.spyOn(commands, 'githubRepository').mockImplementation(repository => ({ ...bind(repository), pages: pages as never }))
+  return pages
+}
 describe('account-isolated operations', () => {
   it('uses the agent account\'s GitHub CLI and preserves literal shell metacharacters in argv', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal); const run = vi.spyOn(commands,'run').mockResolvedValue('{}')
@@ -29,28 +37,39 @@ describe('account-isolated operations', () => {
       expect(output).not.toContain('GH_TOKEN=')
     } finally { delete process.env.GH_TOKEN }
   })
+  it('binds GitLab calls to one project, except the account endpoints', async () => {
+    const local = testDeployment({ gitlab: { cli: '/path/agent-glab', host: 'gitlab.acme.test', login: 'Agent-Bot', noreply: '7-Agent-Bot@noreply.gitlab.acme.test' } })
+    const commands = new Commands(() => local, {}, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run').mockResolvedValue('[]')
+    const calls = commands.gitlabProject('apc/server/ape')
+    await calls.api(z.array(z.unknown()), 'issues?state=all')
+    await calls.pages(z.object({ id: z.number() }), 'todos')
+    await expect(calls.api(z.unknown(), '../outside')).rejects.toThrow()
+    expect(run.mock.calls[0]![1]).toEqual(['api', 'projects/apc%2Fserver%2Fape/issues?state=all'])
+    expect(run.mock.calls[1]![1]).toEqual(['api', 'todos?per_page=100&page=1'])
+  })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
     await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')
   })
   it('reconciles an uncertain GitHub send with its stable marker', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)
-    vi.spyOn(commands,'pages').mockResolvedValue([{ body:'<!-- dsh-superagent:stable-operation -->',user:{login:'agent-bot'} }])
+    stubPages(commands, [{ body:'<!-- dsh-superagent:stable-operation -->',user:{login:'agent-bot'} }])
     const gh = vi.spyOn(commands,'gh')
     await send(commands, reply); expect(gh).not.toHaveBeenCalled()
   })
   it('posts the reply as the model wrote it, only to the fixed repository', async () => {
-    const commands = new Commands(() => deployment, {}, new AbortController().signal); vi.spyOn(commands,'pages').mockResolvedValue([])
+    const commands = new Commands(() => deployment, {}, new AbortController().signal); stubPages(commands)
     const gh = vi.spyOn(commands,'gh').mockResolvedValue({})
     await send(commands, reply)
     // The disclosure line is prompt text: the model writes it, and the host adds nothing.
     expect(gh).toHaveBeenCalledWith(['api',`repos/${REPOSITORY}/issues/8/comments`,'--method','POST','-f',expect.stringMatching(/^body=Done\n\n<!-- dsh-superagent:stable-operation -->$/)])
-    await expect(new Commands(() => deployment, {}, new AbortController().signal).pages(z.unknown(),
+    await expect(new Commands(() => deployment, {}, new AbortController().signal).githubRepository(REPOSITORY).pages(z.unknown(),
       '../../someone/else/issues')).rejects.toThrow()
   })
   it('routes review-comment replies to the root review comment', async () => {
-    const commands = new Commands(() => deployment, {}, new AbortController().signal); vi.spyOn(commands,'pages').mockResolvedValue([])
+    const commands = new Commands(() => deployment, {}, new AbortController().signal); stubPages(commands)
     const gh = vi.spyOn(commands,'gh').mockResolvedValueOnce({ id: 7, in_reply_to_id: 3 }).mockResolvedValueOnce({})
-    await send(commands, { ...reply, channel: githubChannel(8, `https://github.com/${REPOSITORY}/pull/8#discussion_r7`) })
+    await send(commands, { ...reply, channel: githubChannel(instance, 8, `https://github.com/${REPOSITORY}/pull/8#discussion_r7`) })
     expect(gh.mock.calls[1]![0]).toEqual(['api', `repos/${REPOSITORY}/pulls/8/comments/3/replies`, '--method', 'POST', '-f', expect.stringContaining('Done')])
   })
   it('uses Feishu bot identity and one idempotency key on retries', async () => {
@@ -91,7 +110,7 @@ describe('Channels', () => {
   })
   it('drop a GitHub reply to an Issue that is deleted or locked, and keep others for a retry', async () => {
     const value = commands()
-    vi.spyOn(value, 'pages').mockResolvedValue([])
+    stubPages(value)
     const gh = vi.spyOn(value, 'gh')
     for (const stderr of ['gh: This issue was deleted (HTTP 410)', 'gh: Unable to create comment because issue is locked. (HTTP 403)']) {
       gh.mockRejectedValueOnce(commandError({ stderr, code: 1 }))
@@ -105,22 +124,24 @@ describe('Channels', () => {
   })
   it('reply on the PR\'s conversation when the review comment a reply points at is gone', async () => {
     const value = commands()
-    const pages = vi.spyOn(value, 'pages').mockResolvedValue([])
+    const pages = stubPages(value)
     const gh = vi.spyOn(value, 'gh')
       .mockRejectedValueOnce(commandError({ stderr: 'gh: Not Found (HTTP 404)', code: 1 })).mockResolvedValueOnce({})
-    expect(await send(value, { ...reply, channel: githubChannel(8, `https://github.com/${REPOSITORY}/pull/8#discussion_r7`) })).toBe('sent')
+    expect(await send(value, { ...reply, channel: githubChannel(instance, 8, `https://github.com/${REPOSITORY}/pull/8#discussion_r7`) })).toBe('sent')
     expect((pages.mock.calls[0] as unknown[])[1]).toBe('issues/8/comments')
     const post = ['api', `repos/${REPOSITORY}/issues/8/comments`, '--method', 'POST', '-f', expect.stringContaining('Done')]
     expect(gh.mock.calls[1]![0]).toEqual(post)
   })
   it('link each address to its page with its label', () => {
-    const links = { repository: REPOSITORY, feishu: deployment.feishu! }
-    expect(githubKind.channel!.link(githubChannel(8).address, links)).toEqual({ url: `https://github.com/${REPOSITORY}/issues/8`,
+    const links = { feishu: deployment.feishu! }
+    expect(githubKind.channel!.link(githubChannel(instance, 8).address, links)).toEqual({ url: `https://github.com/${REPOSITORY}/issues/8`,
       label: { zh: 'GitHub #8', en: 'GitHub #8' } })
     const review = `https://github.com/${REPOSITORY}/pull/8#discussion_r7`
-    expect(githubKind.channel!.link(githubChannel(8, review).address, links))
+    expect(githubKind.channel!.link(githubChannel(instance, 8, review).address, links))
       .toEqual({ url: review, label: { zh: 'GitHub #8 的 review 讨论', en: 'Review discussion on GitHub #8' } })
-    expect(githubKind.channel!.link(githubChannel(8).address, {}).url).toBe('')
+    // An address carries its repository, so the link needs no deployment info; one without a repository has no page.
+    expect(githubKind.channel!.link(githubChannel(instance, 8).address, {}).url).toBe(`https://github.com/${REPOSITORY}/issues/8`)
+    expect(githubKind.channel!.link({ number: '8' }, {}).url).toBe('')
     const message = feishuChannel('oc_1', 'om_1').address
     expect(feishuKind.channel!.link(message, links)).toEqual({ url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_1',
       label: { zh: '飞书消息', en: 'Feishu message' }, triggerId: key('feishu', 'om_1') })
@@ -130,34 +151,34 @@ describe('Channels', () => {
 describe('GitHub calls', () => {
   const commands = () => new Commands(() => deployment, {}, new AbortController().signal)
   it('go only to paths inside the configured repository, and validate what GitHub answers', async () => {
-    const value = commands()
+    const value = commands(), repository = value.githubRepository(REPOSITORY)
     const run = vi.spyOn(value, 'run').mockResolvedValue('{"number":12,"title":"Login fails","extra":true}')
-    expect(await value.api(z.looseObject({ number: z.number() }), 'issues/12')).toEqual({ number: 12, title: 'Login fails', extra: true })
+    expect(await repository.api(z.looseObject({ number: z.number() }), 'issues/12')).toEqual({ number: 12, title: 'Login fails', extra: true })
     expect(run).toHaveBeenLastCalledWith('/path/agent-gh', ['api', `repos/${REPOSITORY}/issues/12`])
-    await expect(value.api(z.looseObject({ number: z.string() }), 'issues/12')).rejects.toThrow()
+    await expect(repository.api(z.looseObject({ number: z.string() }), 'issues/12')).rejects.toThrow()
     for (const path of ['../other/repo/issues', 'issues/../../x', '/repos/x/y', 'https://api.github.com/x']) {
-      await expect(value.api(z.unknown(), path)).rejects.toThrow('restricted to the configured repository')
+      await expect(repository.api(z.unknown(), path)).rejects.toThrow('restricted to configured repositories')
     }
     expect(run).toHaveBeenCalledTimes(2)
     // An empty path targets the repository root.
-    await value.api(z.unknown(), '')
+    await repository.api(z.unknown(), '')
     expect(run).toHaveBeenLastCalledWith('/path/agent-gh', ['api', `repos/${REPOSITORY}`])
     // Without a schema, api() returns the raw CLI stdout.
     run.mockResolvedValue('raw file')
-    expect(await value.api('contents/README.md', '-H', 'Accept: application/vnd.github.raw')).toBe('raw file')
+    expect(await repository.api('contents/README.md', '-H', 'Accept: application/vnd.github.raw')).toBe('raw file')
   })
   it('read every page of a list, and skip and count an item that does not validate', async () => {
-    const value = commands()
+    const value = commands(), repository = value.githubRepository(REPOSITORY)
     const run = vi.spyOn(value, 'run').mockResolvedValue('[[{"id":1}],[{"id":2}]]')
-    expect(await value.pages(z.looseObject({ id: z.number() }), 'issues/12/comments?per_page=100')).toEqual([{ id: 1 }, { id: 2 }])
+    expect(await repository.pages(z.looseObject({ id: z.number() }), 'issues/12/comments?per_page=100')).toEqual([{ id: 1 }, { id: 2 }])
     expect(run).toHaveBeenLastCalledWith('/path/agent-gh', ['api', `repos/${REPOSITORY}/issues/12/comments?per_page=100`, '--paginate',
       '--slurp'])
     run.mockResolvedValue('[[{"id":1}],[{"id":"two"}]]')
     const tally = { skipped: 0 }
-    expect(await value.pages(z.looseObject({ id: z.number() }), 'issues/12/comments', tally)).toEqual([{ id: 1 }])
+    expect(await repository.pages(z.looseObject({ id: z.number() }), 'issues/12/comments', tally)).toEqual([{ id: 1 }])
     expect(tally).toEqual({ skipped: 1 })
     run.mockResolvedValue('{"message":"not a list"}')
-    await expect(value.pages(z.looseObject({ id: z.number() }), 'issues/12/comments')).rejects.toThrow()
+    await expect(repository.pages(z.looseObject({ id: z.number() }), 'issues/12/comments')).rejects.toThrow()
   })
 })
 it('says how to add the bot to a chat when Feishu answers that it is not a member, and keeps the code', async () => {

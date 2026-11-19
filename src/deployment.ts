@@ -42,20 +42,36 @@ export function machineOf(config: DeploymentConfig): Machine {
   return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
-export const GithubAccountsSchema = z.object({
-  repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
+/** GitHub account-level Source configuration: one CLI login serves every configured repository instance. */
+export const GithubAccountsSchema = z.object({ cli: z.string().trim().default('') })
+/** GitLab account-level Source configuration: one CLI login serves every configured project instance. */
+export const GitlabAccountsSchema = z.object({
+  host: z.string().trim().regex(/^([A-Za-z0-9.-]+)?$/, 'GitLab host such as gitlab.example.com').default(''),
   cli: z.string().trim().default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+/** POPO Source account configuration: the `popo-robot` CLI that holds the robot's credentials. */
+export const PopoBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  github: Object.keys(GithubAccountsSchema.shape), gitlab: Object.keys(GitlabAccountsSchema.shape),
+  feishu: Object.keys(FeishuBotSchema.shape), popo: Object.keys(PopoBotSchema.shape),
+}
+/** Instance-level Source keys that re-check the deployment when changed; the plain kind key stays in SETUP_FIELDS. */
+export const INSTANCE_SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: ['repository'], gitlab: ['repository'] }
 
 export interface Deployment extends Machine {
-  repository: string
-  github: { cli: string; login: string; noreply: string }
+  /** The GitHub account serving every configured repository; absent while the GitHub Source names no CLI. */
+  github?: GithubAccount
+  gitlab?: GitlabAccount
   feishu?: FeishuBot
+  popo?: PopoBot
 }
+export interface GithubAccount { cli: string; login: string; noreply: string }
+export interface GitlabAccount { cli: string; host: string; login: string; noreply: string }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+/** The POPO robot: its `popo-robot` CLI and its account (`uid`), as `whoami` reports it. */
+export interface PopoBot { cli: string; uid: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -83,26 +99,33 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/**
+ * Verify the agent's GitHub CLI identity.
+ * Returns undefined while the GitHub Source names no CLI, so deployments that never opted in start as before.
+ * Per-repository push access is verified separately for each configured instance by `resolveGithubRepository`.
+ */
+export async function resolveGithub(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GithubAccount | undefined> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
-  const remote = accounts.repository
-  if (!remote) throw new SetupError('repositoryUnset')
-  if (!accounts.cli) throw new SetupError('agentCliUnset')
+  if (!accounts.cli) return undefined
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
   const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
+  return { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` }
+}
+
+/** Verify push access to one configured GitHub repository; returns its canonical owner/name. */
+export async function resolveGithubRepository(account: { cli: string; login: string }, repository: string, probe: Probe): Promise<string> {
+  if (!repository) throw new SetupError('repositoryUnset')
   // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
-  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
-    throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
+  const access = parsed(RepositoryAccess, await probe([account.cli, 'api', `repos/${repository}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
+    throw new SetupError('repositoryUnreadable', { account: account.login, repository, output: reason(error) })
   }))
-  if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
-  const repository = access.name
-  if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  if (!access) throw new SetupError('repositoryUnreported', { repository })
+  if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: account.login, repository: access.name })
+  return access.name
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })
@@ -128,4 +151,61 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   const info = parsed(BotInfo, (await run('api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson')).split('\n')[0] ?? '')
   if (!info) return fail(new SetupError('feishuNoBot'))
   return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
+}
+
+const GitlabUser = z.object({ username: z.string().regex(/^[A-Za-z0-9_.-]+$/), id: z.number().int().positive() })
+const GitlabProject = z.object({
+  path_with_namespace: z.string().regex(/^([A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+$/),
+  permissions: z.object({
+    project_access: z.object({ access_level: z.number() }).nullish(),
+    group_access: z.object({ access_level: z.number() }).nullish(),
+  }),
+})
+/**
+ * Verify the agent's GitLab CLI identity and the configured host.
+ * Returns undefined while the GitLab Source names no host or CLI, so deployments that never opted in start as before.
+ * Per-project access is verified separately for each configured instance by `resolveGitlabProject`.
+ */
+export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabAccount | undefined> {
+  const accounts = GitlabAccountsSchema.parse(gitlab ?? {})
+  if (!accounts.host && !accounts.cli) return undefined
+  const { stateDir } = machine
+  if (!accounts.host) throw new SetupError('gitlabHostUnset')
+  if (!accounts.cli) throw new SetupError('gitlabCliUnset')
+  let cli: string
+  try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('gitlabCliMissing', { output: reason(error) }) }
+  const run = (...args: string[]): Promise<string> =>
+    probe(['env', `GITLAB_HOST=${accounts.host}`, cli, ...args]).catch((error: unknown) => { throw new SetupError('gitlabCliFailed', { host: accounts.host, output: reason(error) }) })
+  const agent = parsed(GitlabUser, await run('api', 'user'))
+  if (!agent) throw new SetupError('gitlabCliNoAccount')
+  return { cli, host: accounts.host, login: agent.username, noreply: `${agent.id}-${agent.username}@noreply.${accounts.host}` }
+}
+
+/** Verify Developer-or-higher access to one configured GitLab project; returns its canonical group/subgroup/name path. */
+export async function resolveGitlabProject(account: { cli: string; host: string; login: string }, repository: string, probe: Probe): Promise<string> {
+  // Use the canonical project path GitLab returns so renamed or moved projects match incoming events.
+  const projectText = await probe(['env', `GITLAB_HOST=${account.host}`, account.cli, 'api', `projects/${encodeURIComponent(repository)}`])
+    .catch((error: unknown) => { throw new SetupError('gitlabRepositoryUnreadable', { account: account.login, repository, output: reason(error) }) })
+  const project = parsed(GitlabProject, projectText)
+  if (!project) throw new SetupError('gitlabRepositoryUnreported', { repository })
+  // GitLab grants push at Developer (30) and above; Reporter (20) and below cannot push branches.
+  const level = Math.max(project.permissions.project_access?.access_level ?? 0, project.permissions.group_access?.access_level ?? 0)
+  if (level < 30) throw new SetupError('gitlabRepositoryReadOnly', { account: account.login, repository: project.path_with_namespace })
+  return project.path_with_namespace
+}
+
+const PopoWho = z.object({ robotUid: z.string().min(1) })
+/**
+ * Verify the agent's `popo-robot` CLI: `whoami` must exchange the stored credentials for a token and name the robot's account.
+ * Returns undefined while the POPO Source names no CLI, so deployments that never opted in start as before.
+ */
+export async function resolvePopo(machine: Machine, popo: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<PopoBot | undefined> {
+  const { cli: name } = PopoBotSchema.parse(popo ?? {})
+  if (!name) return undefined
+  let cli: string
+  try { cli = executable(name, path, workerBin(machine.stateDir)) } catch (error) { throw new SetupError('popoCliMissing', { output: reason(error) }) }
+  const text = await probe([cli, 'whoami']).catch((error: unknown) => { throw new SetupError('popoCliFailed', { output: reason(error) }) })
+  const who = parsed(PopoWho, text)
+  if (!who) throw new SetupError('popoNoAccount')
+  return { cli, uid: who.robotUid }
 }

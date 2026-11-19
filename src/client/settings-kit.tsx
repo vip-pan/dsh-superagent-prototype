@@ -69,11 +69,103 @@ function SwitchRow({ label, hint, checked,
   </div>
 }
 type RoleModel = Settings['eval']['model']
+function ModelOptionInput({ id, value, placeholder, options, loading, onChange, onOpen }: {
+  id?: string
+  value: string
+  placeholder: string
+  options: readonly { id: string; name: string }[]
+  loading: boolean
+  onChange: (next: string) => void
+  onOpen: () => void
+}) {
+  const { t } = usePanel()
+  const [open, setOpen] = useState(false)
+  const [filter, setFilter] = useState('')
+  const [active, setActive] = useState(0)
+  const listId = id + '-options'
+  const needle = filter.trim().toLocaleLowerCase()
+  const visible = needle ? options.filter(option => (option.name + ' ' + option.id).toLocaleLowerCase().includes(needle)) : options
+  const highlighted = Math.min(active, Math.max(0, visible.length - 1))
+  const show = () => {
+    if (!open) { setFilter(''); setActive(0) }
+    setOpen(true)
+    onOpen()
+  }
+  const choose = (next: string) => {
+    onChange(next)
+    setFilter('')
+    setOpen(false)
+  }
+  useEffect(() => {
+    if (open) document.getElementById(listId + '-' + highlighted)?.scrollIntoView?.({ block: 'nearest' })
+  }, [highlighted, listId, open])
+  return <div className={'dt-model-select' + (loading ? ' is-loading' : '')} onClick={event => {
+    if ((event.target as Element).closest('[role="listbox"]')) return
+    if (!(event.target instanceof HTMLInputElement)) event.currentTarget.querySelector('input')?.focus()
+    show()
+  }}>
+    <Input id={id} role="combobox" aria-autocomplete="list" aria-expanded={open}
+      aria-controls={open ? listId : undefined} aria-activedescendant={open && visible.length ? listId + '-' + highlighted : undefined}
+      aria-busy={loading} autoComplete="off" spellCheck={false} placeholder={placeholder} value={value}
+      onChange={event => {
+        onChange(event.target.value)
+        setFilter(event.target.value)
+        setActive(0)
+        setOpen(true)
+      }}
+      onBlur={() => setOpen(false)}
+      onKeyDown={event => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault()
+          if (!open) { show(); return }
+          setActive(current => event.key === 'ArrowDown'
+            ? Math.min(current + 1, Math.max(0, visible.length - 1)) : Math.max(0, current - 1))
+        } else if (event.key === 'Enter' && open && visible[highlighted]) {
+          event.preventDefault()
+          choose(visible[highlighted].id)
+        } else if (event.key === 'Escape' && open) {
+          event.preventDefault()
+          event.stopPropagation()
+          setOpen(false)
+        }
+      }} />
+    <span className="dt-model-chevron" aria-hidden="true"><Icon name={loading ? 'refresh' : open ? 'chevron-up' : 'chevron-down'} /></span>
+    {open && <div className="dt-model-options" role="listbox" id={listId}>
+      {loading && <div className="dt-model-status"><Icon name="refresh" />{t('loading')}</div>}
+      {visible.map((option, index) => <button type="button" className="dt-model-option" role="option" id={listId + '-' + index} key={option.id}
+        aria-selected={value === option.id} data-active={index === highlighted || undefined}
+        onMouseEnter={() => setActive(index)} onMouseDown={event => event.preventDefault()} onClick={() => choose(option.id)}>
+        <span className="dt-model-option-name">{option.name}</span>{option.name !== option.id && <code>{option.id}</code>}
+      </button>)}
+      {!loading && !visible.length && <div className="dt-model-status">{t('modelOptionsEmpty')}</div>}
+    </div>}
+  </div>
+}
+
 export function ModelField({ id, value, onChange }: { id: string; value: RoleModel; onChange: (next: RoleModel) => void }) {
   const { t, call } = usePanel()
   const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
-  useEffect(() => { call('GET models').then(setCatalog, failure => setError(errorText(failure))) }, [call])
+  const latest = useRef(0)
+  const refresh = async () => {
+    const request = ++latest.current
+    setLoading(true)
+    try {
+      const next = await call('GET models')
+      if (request !== latest.current) return
+      setCatalog(next)
+      setError(undefined)
+    } catch (failure) {
+      if (request === latest.current) setError(errorText(failure))
+    } finally {
+      if (request === latest.current) setLoading(false)
+    }
+  }
+  useEffect(() => {
+    void refresh()
+    return () => { latest.current++ }
+  }, [call])
   const current = { provider: value?.provider ?? '', model: value?.model ?? '', effort: value?.reasoningEffort ?? '' }
   const set = (next: Partial<typeof current>) => {
     const { provider, model, effort } = { ...current, ...next }
@@ -81,22 +173,19 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
   }
   const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
   const fallback = catalog?.default
-  const input = (name: keyof typeof current, label: string, placeholder: string) => <Field label={label}>
-    <Input list={`${id}-${name}s`} spellCheck={false} placeholder={placeholder} value={current[name]}
-      onChange={event => set({ [name]: event.target.value })} />
-  </Field>
   return <div className="dt-model">
-    <Hint>{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
-      ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</Hint>
+    <Hint>{fallback ? t('defaultModel', { model: fallback.provider + ' / ' + fallback.model + (fallback.reasoningEffort
+      ? ' · ' + fallback.reasoningEffort : '') }) : t('defaultModelUnavailable')}</Hint>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
     <div className="dt-grid3">
-      {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
-        t('modelEffort'), t('modelEffortDefault'))}
+      <Field label={t('modelProvider')}><ModelOptionInput value={current.provider} placeholder={t('modelInherit')}
+        options={catalog?.groups ?? []} loading={loading} onOpen={refresh} onChange={provider => set({ provider })} /></Field>
+      <Field label={t('modelName')}><ModelOptionInput value={current.model} placeholder={t('modelInherit')}
+        options={models} loading={loading} onOpen={refresh} onChange={model => set({ model })} /></Field>
+      <Field label={t('modelEffort')}><Input list={id + '-efforts'} spellCheck={false} placeholder={t('modelEffortDefault')}
+        value={current.effort} onChange={event => set({ effort: event.target.value })} /></Field>
     </div>
-    <datalist id={`${id}-providers`}>{catalog?.groups.map(group => <option key={group.id}
-      value={group.id}>{group.name}</option>)}</datalist>
-    <datalist id={`${id}-models`}>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
-    <datalist id={`${id}-efforts`}>
+    <datalist id={id + '-efforts'}>
       {(models.find(model => model.id === current.model.trim())?.reasoning?.efforts ?? []).map(effort => <option key={effort.id}
         value={effort.id}>{effort.name}</option>)}
     </datalist>
@@ -113,7 +202,7 @@ function changeText(t: T, change: HistoryChange, sources: SourceView[]): string 
   return t(`change.${change.code}`,
     { items: (change.items ?? []).map(item => source?.labels[item] ?? item).join(t('listSeparator')),
     from: shown(change.from), to: shown(change.to), name: change.name ?? '', source: source ? localized(t, source.title)
-      : change.source ?? '',
+      : valueLabel(t, 'source', change.source),
     field: field ? localized(t, field.label) : change.field ?? '' })
 }
 /**
@@ -261,8 +350,8 @@ export function SourceField({ field, value, saved, fact, onChange, labels, refre
           {value && !labels[String(value)] ? <option value={String(value)}>{String(value)}</option> : null}
           {Object.entries(labels).sort(byName).map(([option, name]) => <option key={option} value={option}>{name}</option>)}
         </select>
-        : <Input value={String(value ?? '')} readOnly={field.readonly} pattern={field.pattern} spellCheck={false}
-          onChange={event => onChange(event.target.value)} />}
+        : <Input type="text" value={String(value ?? '')} readOnly={field.readonly}
+          pattern={field.pattern} spellCheck={false} onChange={event => onChange(event.target.value)} />}
     </Field>
     case 'fact': return <div className="dt-field">
       <span className="dt-field-head">{label}{hint && <InfoTip text={hint} />}</span>

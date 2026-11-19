@@ -1,13 +1,13 @@
 /** Computes structured settings diffs across saved revisions for display in the management panel. */
 import type { FieldSpec } from '../sources/kind.ts'
-import type { SourceRegistry } from '../sources/registry.ts'
+import { sourceKey, type SourceRegistry } from '../sources/registry.ts'
 import { KV } from '../kv.ts'
 import type { Store, SettingsVersion } from './store.ts'
 
 type SourceSettings = SettingsVersion['settings']['sources'][string]
 /** Change codes localized by the web panel as `change.<code>`. */
 export type SettingsChangeCode = 'ruleAdded' | 'ruleRenamed' | 'ruleInstruction' | 'ruleEnabled' | 'ruleDisabled' | 'ruleRemoved'
-  | 'sourceEnabled' | 'sourceDisabled' | 'sourceField' | 'sourceRowsAdded' | 'sourceRowsRemoved' | 'sourceRowsChanged' | 'sourceAdmission'
+  | 'sourceEnabled' | 'sourceDisabled' | 'sourceAdded' | 'sourceRemoved' | 'sourceField' | 'sourceRowsAdded' | 'sourceRowsRemoved' | 'sourceRowsChanged' | 'sourceAdmission'
   | 'mode' | 'timeout' | 'evalModel' | 'executorModel' | 'maxWorkers' | 'paused' | 'resumed' | 'executionDirectory' | 'prepareCommand'
   | 'blockedCommands'
 /** A single settings diff entry rendered by the panel using `change.<code>` and field labels from the Source listing. */
@@ -38,11 +38,15 @@ function fieldChanges(id: string, fields: readonly FieldSpec[], a: Record<string
   return changes
 }
 function sourceChanges(id: string, before: SourceSettings | undefined, after: SourceSettings | undefined, sources: SourceRegistry): SettingsChange[] {
-  const kind = sources.kind(id)
+  const { kind: kindId, name } = sourceKey(id)
+  const kind = sources.kind(kindId)
+  // An instance of a multi-instance kind is stored and removed whole, with the fields of its own schema.
+  if (name !== undefined && (!before || !after)) return [{ code: after ? 'sourceAdded' : 'sourceRemoved', source: id }]
   const changes: SettingsChange[] = []
   if ((before?.enabled ?? true) !== (after?.enabled ?? true)) changes.push({ code: after?.enabled === false ? 'sourceDisabled' : 'sourceEnabled', source: id })
-  const fill = (value: SourceSettings | undefined) => kind ? kind.schema.parse(value?.config ?? {}) : value?.config ?? {}
-  return [...changes, ...fieldChanges(id, kind?.fields ?? [], fill(before), fill(after))]
+  const schema = name !== undefined ? kind?.multi?.schema : kind?.schema
+  const fill = (value: SourceSettings | undefined) => schema ? schema.parse(value?.config ?? {}) : value?.config ?? {}
+  return [...changes, ...fieldChanges(id, name !== undefined ? kind?.multi?.fields ?? [] : kind?.fields ?? [], fill(before), fill(after))]
 }
 function settingsChanges(before: SettingsVersion['settings'], after: SettingsVersion['settings'], sources: SourceRegistry): SettingsChange[] {
   const changes: SettingsChange[] = []

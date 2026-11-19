@@ -103,6 +103,20 @@
 .dt-rule-body { display: flex; flex-direction: column; gap: 12px; padding: 8px 0 8px 28px; }
 .dt-model { display: flex; flex-direction: column; gap: 6px; }
 .dt-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.dt-model-select { position: relative; min-width: 0; }
+.dt-model-select .dt-input { box-sizing: border-box; width: 100%; padding-right: 30px; }
+.dt-model-chevron { position: absolute; top: 50%; right: 10px; display: flex; transform: translateY(-50%); pointer-events: none; color: var(--dsw-alias-label-tertiary); }
+.dt-model-select.is-loading .dt-model-chevron svg { animation: dt-model-spin .9s linear infinite; }
+.dt-model-options { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; left: 0; max-height: 280px; overflow-y: auto; padding: 5px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 10px; background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-prominent); }
+.dt-model-option { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.dt-model-option:hover, .dt-model-option[data-active='true'] { background: var(--dsw-alias-interactive-bg-hover); }
+.dt-model-option[data-active='true'] { outline: 1px solid var(--dsw-alias-border-l4); }
+.dt-model-option[aria-selected='true'] { background: var(--dsw-alias-button-ghost-active-fill); }
+.dt-model-option-name { width: 100%; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.dt-model-option[aria-selected='true'] .dt-model-option-name { font-weight: 600; }
+.dt-model-option code { color: var(--dsw-alias-label-caption); font-size: 11px; overflow-wrap: anywhere; }
+.dt-model-status { display: flex; align-items: center; gap: 6px; padding: 10px; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+@keyframes dt-model-spin { to { transform: rotate(360deg); } }
 .dt-changes { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 20px; }
 .dt-changes li::before { content: '· '; color: var(--dsw-alias-label-caption); }
 .dt-main { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
@@ -225,6 +239,7 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-field .dt-input, .dt-search .dt-input, .dt-add-skill .dt-input { display: flex; width: 100%; }
 .dt-switch { box-sizing: border-box; flex: 0 0 auto; width: 36px; height: 20px; padding: 2px; border: 0; border-radius: 10px; background: var(--dsw-alias-border-l3); cursor: pointer; }
 .dt-switch[aria-checked='true'] { background: var(--dsw-alias-brand-primary); }
+.dt-switch:disabled { cursor: not-allowed; opacity: 0.4; }
 .dt-switch:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
 .dt-switch-thumb { display: block; width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-label-primary-foreground); transition: transform 120ms ease; }
 .dt-switch[aria-checked='true'] .dt-switch-thumb { transform: translateX(16px); }
@@ -309,6 +324,8 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-subtabs { display: flex; gap: 16px; border-bottom: 0.5px solid var(--dsw-alias-border-l3); }
 .dt-subtab { padding: 0 0 6px; border: 0; background: none; color: var(--dsw-alias-label-tertiary); font: inherit; font-size: 13px; cursor: pointer; }
 .dt-subtab[aria-selected='true'] { color: var(--dsw-alias-label-primary); font-weight: 500; box-shadow: inset 0 -1.5px 0 var(--dsw-alias-label-primary); }
+.dt-instances { display: flex; flex-direction: column; gap: 12px; }
+.dt-add-form { display: flex; flex-direction: column; gap: 12px; }
 .dt-part { display: flex; flex-direction: column; gap: 12px; }
 .dt-rows-summary { text-align: left; color: var(--dsw-alias-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .dt-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 18px; }

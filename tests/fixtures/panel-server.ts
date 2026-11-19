@@ -12,11 +12,11 @@ import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, Source
   ThreadRow, TicketPageView,
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
-import { SETUP_FIELDS } from '../../src/deployment.ts'
+import { INSTANCE_SETUP_FIELDS, SETUP_FIELDS } from '../../src/deployment.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
-import { githubChannel } from '../../src/sources/github-trigger.ts'
+import { githubChannel, githubInstanceId } from '../../src/sources/github-trigger.ts'
 import { feishuKind } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import type { Health } from '../../src/sources/host.ts'
@@ -24,7 +24,8 @@ import type { SourceKind } from '../../src/sources/kind.ts'
 import { testDeployment } from './deployment.ts'
 
 export const MEMBER = 'ou_alice'
-const ALLOWED: Record<string, { id: string; name?: string }[]> = { feishu: [{ id: MEMBER, name: 'Alice' }], github: [{ id: 'alice' }] }
+const ALLOWED: Record<string, { id: string; name?: string }[]> = { feishu: [{ id: MEMBER, name: 'Alice' }], github: [{ id: 'alice' }],
+  'github:acme~widgets': [{ id: 'alice' }] }
 type Actor = TriggerRow['actor']
 /** Resolve an actor display label using the fixture policy's allowed list or the source kind's unnamed fallback. */
 export function actor(source: string, id: string, human = true): Actor {
@@ -72,7 +73,7 @@ export const promptVersion = (revision: number, config: PromptsView['current']['
 export const droppedReply = (id: string, hoursAgo: number, source: 'feishu' | 'github', reason: DroppedReply['dropped']['reason'],
   { ticket, thread }: { ticket?: DroppedReply['ticket']; thread?: false } = {}): DroppedReply => ({
   id, preview: `Reply ${id}`, kind: 'reply',
-  channel: source === 'feishu' ? feishuChannel('oc_1', 'om_root') : githubChannel(42),
+  channel: source === 'feishu' ? feishuChannel('oc_1', 'om_root') : githubChannel({ source: githubInstanceId('acme/widgets'), repository: 'acme/widgets' }, 42),
   dropped: { at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString(), reason }, ...ticket ? { ticket } : {},
   ...thread === false ? {} : { thread: source === 'feishu' ? 'feishu:oc_1:om_root' : 'github:42' },
 })
@@ -88,6 +89,7 @@ export interface PanelServer {
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
+  models?: ApiResponse<'GET models'>
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
@@ -113,7 +115,7 @@ export let server: PanelServer
 
 function resolved() {
   const accounts = server.setup.accounts
-  return accounts ? testDeployment({ repository: accounts.repository, github: { cli: '/bin/false', login: accounts.agent, noreply: '' },
+  return accounts ? testDeployment({ github: accounts.agent ? { cli: '/bin/false', login: accounts.agent, noreply: '' } : undefined,
     ...accounts.feishu ? { feishu: { cli: '/bin/false', ...accounts.feishu } } : { feishu: undefined } }) : undefined
 }
 /** Default source health: paused during setup; Feishu defaults to `socket closed` unless overridden or paused by setup. */
@@ -124,37 +126,45 @@ function healthOf(name: string): Health {
   return server.setup.feishuProblem ? { state: 'paused', detail: server.setup.feishuProblem.detail } : { state: 'error',
     detail: 'socket closed' }
 }
-const problemOf_ = (id: string) => [server.setup.problem, server.setup.feishuProblem].find(item => item?.place === id) ?? undefined
-function sourceSettings(): SourceView[] {
-  return KINDS.map(kind => {
-    const config = kind.schema.parse(server.settings.sources[kind.kind]?.config ?? {})
-    const problem = problemOf_(kind.kind)
-    const { admission: _admission, ...part } = server.settings.policy.sources[kind.kind] ?? { allowed: [], admission: {} }
-    const sync = kind.policy?.sync && { label: kind.policy.sync.label, ready: kind.policy.sync.ready(kind.policy.schema.parse(part)),
-      health: server.health[`sync:${kind.kind}`] }
-    const policy = kind.policy && { fields: kind.policy.fields, explicit: kind.policy.explicit, ...kind.policy.rows
-      ? { rows: kind.policy.rows(config) } : {}, ...sync ? { sync } : {} }
-    return { id: kind.kind, kind: kind.kind, title: kind.title, description: kind.description, installed: true,
-      value: { enabled: server.settings.sources[kind.kind]?.enabled ?? true, config },
-        revision: server.revisions[`source:${kind.kind}`] ?? 0,
-      restarts: SETUP_FIELDS[kind.kind] ?? [], fields: kind.fields, facts: kind.facts?.(resolved()) ?? {},
-      labels: kind.kind === 'feishu' ? { oc_team: '团队群', oc_other: '另一个群', ...server.joined } : {}, ...problem ? { problem } : {},
-      ...policy ? { policy } : {} }
-  })
+// A watched repository of a multi-instance kind is a Source of its own, named by the kind and the repository: github:acme~widgets.
+const instanceIdsOf = (kind: SourceKind) => kind.multi ? Object.keys(server.settings.sources).filter(id => id.startsWith(`${kind.kind}:`)) : []
+const idsOf = (kind: SourceKind) => [kind.kind, ...instanceIdsOf(kind)]
+const kindOfId = (id: string) => KINDS.find(kind => kind.kind === id.split(':')[0])
+const problemOf_ = (id: string) => [server.setup.problem, server.setup.feishuProblem].find(item => item?.place === id
+  || (id.startsWith('github:') && item?.place === 'github')) ?? undefined
+function sourceCard(kind: SourceKind, id: string): SourceView {
+  const instance = id.includes(':')
+  const config = (instance ? kind.multi!.schema : kind.schema).parse(server.settings.sources[id]?.config ?? {})
+  const problem = problemOf_(id)
+  const { admission: _admission, ...part } = server.settings.policy.sources[id] ?? { allowed: [], admission: {} }
+  const policied = kind.policy && !(kind.multi && !instance)
+  const sync = kind.policy?.sync && { label: kind.policy.sync.label, ready: kind.policy.sync.ready(kind.policy.schema.parse(part)),
+    health: server.health[`sync:${id}`] }
+  const policy = policied && kind.policy && { fields: kind.policy.fields, explicit: kind.policy.explicit, ...kind.policy.rows
+    ? { rows: kind.policy.rows(config) } : {}, ...sync ? { sync } : {} }
+  const name = instance ? id.slice(id.lastIndexOf('~') + 1) : ''
+  return { id, kind: kind.kind, title: name ? { zh: `${kind.title.zh} · ${name}`, en: `${kind.title.en} · ${name}` } : kind.title,
+    description: kind.description, installed: true, value: { enabled: server.settings.sources[id]?.enabled ?? true, config },
+    revision: server.revisions[`source:${id}`] ?? 0,
+    restarts: SETUP_FIELDS[id] ?? INSTANCE_SETUP_FIELDS[kind.kind] ?? [], fields: instance ? kind.multi!.fields ?? [] : kind.fields,
+    facts: kind.facts?.(resolved()) ?? {},
+    labels: kind.kind === 'feishu' ? { oc_team: '团队群', oc_other: '另一个群', ...server.joined } : {}, ...problem ? { problem } : {},
+    ...policy ? { policy } : {}, ...kind.multi && !instance ? { instanceFields: kind.multi.fields ?? [] } : {} }
 }
+const sourceSettings = (): SourceView[] => KINDS.flatMap(kind => idsOf(kind).map(id => sourceCard(kind, id)))
 function sourceStatuses(): SourceStatusRow[] {
-  return KINDS.map(kind => {
-    const enabled = server.settings.sources[kind.kind]?.enabled ?? true
-    const health = kind.health.map(name => ({ name, ...healthOf(name) }))
-    const problem = problemOf_(kind.kind)
+  return KINDS.flatMap(kind => idsOf(kind).map(id => ({ kind, id }))).map(({ kind, id }) => {
+    const enabled = server.settings.sources[id]?.enabled ?? true
+    const health = (kind.multi && id.includes(':') ? [id] : kind.health).map(name => ({ name, ...healthOf(name) }))
+    const problem = problemOf_(id)
     const state = !enabled ? 'off' : problem || health.some(item => item.state === 'error') ? 'error' : server.setup.problem ? 'setup'
       : health.some(item => item.state === 'starting') ? 'starting' : health.some(item => item.state === 'paused') ? 'paused' : 'ready'
     const feishu = kind.kind === 'feishu'
-    return { id: kind.kind, title: kind.title, installed: true, enabled, state, health, ...problem ? { problem } : {},
+    return { id, title: sourceCard(kind, id).title, installed: true, enabled, state, health, ...problem ? { problem } : {},
       stats: { received: feishu ? 12 : 0, filtered: feishu ? 2 : 0, lastAt: '2026-09-23T00:00:00Z' },
       filtered: feishu ? [] : [{ id: 'e9', at: '2026-09-23T00:02:00Z', actor: actor('github', 'someone'), preview: 'looks wrong',
         reason: { code: 'source_disabled' } }],
-      dropped: server.dropped.filter(item => item.channel.source === kind.kind && item.dropped.at >= dayAgo()) }
+      dropped: server.dropped.filter(item => item.channel.source === id && item.dropped.at >= dayAgo()) }
   })
 }
 const stateView = (): StateView => ({
@@ -181,7 +191,7 @@ const overviewView = (): ApiResponse<'GET overview'> => {
   const setup = problem ?? feishuProblem
   return {
     problems: [...setup ? [{ kind: 'setup' as const, ...setup }] : [],
-      ...KINDS.some(kind => server.settings.sources[kind.kind]?.enabled !== false) ? [] : [{ kind: 'no-source' as const }],
+      ...KINDS.some(kind => idsOf(kind).some(id => server.settings.sources[id]?.enabled !== false)) ? [] : [{ kind: 'no-source' as const }],
       ...feishuProblem || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
         title: { zh: '飞书', en: 'Feishu' },
         health: { name: 'feishu', state: 'error' as const, detail: 'socket closed' } } }],
@@ -234,11 +244,12 @@ function threadPage(key: string, { before, around }: { before?: string; around?:
 function initial(): PanelServer {
   const settings = SettingsSchema.parse({
     policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' },
-      github: { allowed: [{ id: 'alice' }] } },
+      'github:acme~widgets': { allowed: [{ id: 'alice' }] } },
       rules: [{ id: 'copy', name: '文案修改', enabled: true, instruction: '修正明确的文案错误' }] },
     sources: { feishu: { enabled: true, config: { cli: 'lark-bot', chats: [{ chatId: 'oc_team', listen: 'mentions' }],
       directMessages: true } },
-      github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh-agent' } } },
+      github: { enabled: true, config: { cli: 'gh-agent' } },
+      'github:acme~widgets': { enabled: true, config: { repository: 'acme/widgets' } } },
     executor: { blockedCommands: ['gh-personal'] },
   })
   const ended = ticketSummary({ id: 't0', title: '旧工单', state: 'ended', actions: { retry: false, stop: false },
@@ -248,9 +259,9 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
-    setup: { machine: MACHINE, problem: null, feishuProblem: null,
-      accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
-        name: 'Widgets Bot' } } },
+    setup: { machine: MACHINE, problem: null, feishuProblem: null, gitlabProblem: null, popoProblem: null,
+      accounts: { agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
+        name: 'Widgets Bot' }, gitlab: null, popo: null } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
@@ -344,34 +355,57 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { paused: body.paused }
   } },
   'PUT settings/:block': { body: true, answer: ({ params: { block }, body }) => {
-    const source = block.startsWith('source:') ? KINDS.find(kind => `source:${kind.kind}` === block) : undefined
-    if (!['policy', 'eval', 'executor'].includes(block) && !source) return block.startsWith('source:') ? refuse(404, 'Source not found')
-      : refuse(400, 'Invalid settings: block')
-    if (body.revision !== (server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before saving.')
+    const id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
+    const source = id === undefined ? undefined : kindOfId(id)
+    // As on the server, a multi-instance kind accepts a new instance, saved against revision 0 unless another save created it first.
+    const creating = !!source?.multi && id!.includes(':') && !server.settings.sources[id!]
+    if (!['policy', 'eval', 'executor'].includes(block) && (!source || (!creating && !(id! in server.settings.sources) && id !== source.kind)))
+      return block.startsWith('source:') ? refuse(404, 'Source not found') : refuse(400, 'Invalid settings: block')
+    if (body.revision !== (creating ? 0 : server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before saving.')
     let restarting = false
     if (block === 'policy') server.settings = { ...server.settings, policy: PolicyConfigSchema.parse(body.value) }
     else if (block === 'executor') server.settings = { ...server.settings, executor: ExecutorConfigSchema.parse(body.value) }
     else if (block === 'eval') server.settings = { ...server.settings, eval: EvalConfigSchema.parse(body.value) }
     else if (source) {
       const { enabled, config: value } = SourceSave.parse(body.value)
-      const config = source.schema.parse(value)
+      const config = (id!.includes(':') ? source.multi!.schema : source.schema).parse(value)
       // As on the server, a changed CLI that fails its check refuses the save with the setup problem.
       if (config.cli === 'lark-broken') {
         const refused = new SetupError('feishuCliFailed', { output: 'lark-cli: app secret missing' })
         return refuse(400, refused.message, { setup: refused.problem })
       }
-      restarting = (config.cli ?? '') !== (server.settings.sources[source.kind]?.config.cli ?? '')
-      server.settings = { ...server.settings, sources: { ...server.settings.sources, [source.kind]: { enabled, config } } }
+      restarting = creating || (config.cli ?? '') !== (server.settings.sources[id!]?.config.cli ?? '')
+        || (config.repository ?? '') !== (server.settings.sources[id!]?.config.repository ?? '')
+      // As on the server, a repository or project cannot be on under a Source that is off, and switching a Source off switches them off.
+      const account = id!.includes(':') ? id!.slice(0, id!.indexOf(':')) : undefined
+      if (account && enabled && server.settings.sources[account]?.enabled === false)
+        return refuse(400, 'The Source is off', { code: 'accountDisabled', values: { source: account } })
+      const sources = { ...server.settings.sources, [id!]: { enabled, config } }
+      if (!account && !enabled) for (const key of Object.keys(sources)) if (key.startsWith(`${id}:`) && sources[key]!.enabled) {
+        sources[key] = { ...sources[key]!, enabled: false }
+        server.revisions[`source:${key}`] = (server.revisions[`source:${key}`] ?? 0) + 1
+      }
+      server.settings = { ...server.settings, sources }
     }
     server.revisions[block] = (server.revisions[block] ?? 0) + 1
     return { restarting, revision: server.revisions[block] }
   } },
+  'DELETE settings/:block': { body: true, answer: ({ params: { block }, body }) => {
+    const id = block.startsWith('source:') ? block.slice('source:'.length) : ''
+    if (!id.includes(':') || !(id in server.settings.sources) || !kindOfId(id)?.multi) return refuse(404, 'Source not found')
+    if (body.revision !== (server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before removing.')
+    const { [id]: _removed, ...sources } = server.settings.sources
+    const { [id]: _part, ...policySources } = server.settings.policy.sources
+    server.settings = { ...server.settings, sources, policy: { ...server.settings.policy, sources: policySources } }
+    server.revisions[block] = (server.revisions[block] ?? 0) + 1
+    return { restarting: true, revision: server.revisions[block] }
+  } },
   'GET policy/history': { answer: () => server.history },
   'POST policy-sync/:id': { answer: ({ params }) => ({ policy: server.settings.policy.sources[params.id] }) },
   'POST setup/check': { answer: () => ({ restarting: true }) },
-  'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
+  'GET models': { answer: () => server.models ?? { default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
     groups: [{ id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
-      reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }) },
+      reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] } },
   'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },
   'PUT prompts': { body: true, answer: ({ body }) => {
     const { revision } = server.prompts

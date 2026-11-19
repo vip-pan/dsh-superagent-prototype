@@ -60,7 +60,8 @@ const messages = (t: T): ApiMessages => ({
     requestFailed: status => t('requestFailed', { status }),
   setup: problem => problem.values.output ? `${setupText(t, problem)}\n${problem.values.output}` : setupText(t, problem),
   // A refusal names a prompt part by its label.
-  user: ({ code, values }) => t(`userError.${code}`, values.part ? { ...values, part: valueLabel(t, 'promptPart', values.part) } : values),
+  user: ({ code, values }) => t(`userError.${code}`, { ...values, ...values.part ? { part: valueLabel(t, 'promptPart', values.part) } : {},
+    ...values.source ? { source: valueLabel(t, 'source', values.source) } : {} }),
 })
 function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => void; holdMs?: number }) {
   const done = useRef(onDone)

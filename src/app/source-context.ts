@@ -22,6 +22,10 @@ export interface SourceContextDeps {
   readonly setupProblem?: SetupProblem | undefined
   /** Why setup found no Feishu bot even though the Feishu Source names a CLI. */
   readonly feishuProblem?: SetupProblem | undefined
+  /** Why setup found no GitLab account even though the GitLab Source names a CLI. */
+  readonly gitlabProblem?: SetupProblem | undefined
+  /** Why setup found no POPO account even though the POPO Source names a CLI. */
+  readonly popoProblem?: SetupProblem | undefined
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
 }
@@ -38,7 +42,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     commands: deps.commands,
     ready: deps.ready,
     configured: () => deps.configured(),
-    get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
+    get problem() { return [deps.feishuProblem, deps.gitlabProblem, deps.popoProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined

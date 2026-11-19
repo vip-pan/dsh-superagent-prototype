@@ -3,6 +3,9 @@ import { z } from 'zod'
 import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
+import { githubInstanceId } from '../../sources/github-trigger.ts'
+import { claimMr, readMr } from '../../sources/gitlab-pull.ts'
+import { gitlabInstanceId } from '../../sources/gitlab-trigger.ts'
 import type { SourceContext } from '../../sources/host.ts'
 import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
@@ -12,11 +15,15 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
-  /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
-  readonly github: SourceContext
+  /** GitHub Source context whose pull-request rules govern claiming a reported PR; absent while GitHub is unconfigured. */
+  readonly github?: SourceContext
+  /** GitLab Source context whose merge-request rules govern claiming a reported MR; absent while GitLab is unconfigured. */
+  readonly gitlab?: SourceContext
+  /** The repository instance a ticket reports against when its origin trigger names none: the first enabled one of the kind. */
+  defaultRepository(kind: 'github' | 'gitlab'): string | undefined
   sendReplies(): Promise<void>
 }
 
@@ -79,17 +86,32 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         summary: z.string().min(1),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
-        pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
+        pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github?.deployment.github?.login ?? 'the agent account'} from a branch named after this ticket (DSH_SUPERAGENT_NAME); requires the GitHub Source.`),
+        mr_iid: z.number().int().positive().nullish().describe(`The ticket's merge request on GitLab: its source MR, or one by ${host.gitlab?.deployment.gitlab?.login ?? 'the agent account'} from a branch named after this ticket (DSH_SUPERAGENT_NAME); requires the GitLab Source.`),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
       }).strict(),
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
-        const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : undefined
-        // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
+        if (args.pr_number != null && !host.github) throw new Error('The GitHub Source is not configured; report the work through mr_iid or the summary alone')
+        // The PR or MR belongs to the ticket's own repository (its origin trigger's), or the first enabled one for chat-originated tickets.
+        const origin = host.store.triggers.get(current.origin.triggerId)
+        const named = (key: string) => typeof origin?.meta[key] === 'string' && origin.meta[key] ? origin.meta[key] as string : undefined
+        const repository = named('repository') ?? host.defaultRepository('github')
+        if (args.pr_number != null && !repository) throw new Error('This ticket names no GitHub repository and none is watched; report through the summary alone')
+        const pullInstance = args.pr_number != null && repository ? { source: githubInstanceId(repository), repository } : undefined
+        const pull = args.pr_number != null && host.github && pullInstance ? await readPull(host.github, pullInstance, args.pr_number, signal) : undefined
+        if (args.mr_iid != null && !host.gitlab) throw new Error('The GitLab Source is not configured; report the work through pr_number or the summary alone')
+        const project = named('project') ?? host.defaultRepository('gitlab')
+        if (args.mr_iid != null && !project) throw new Error('This ticket names no GitLab project and none is watched; report through the summary alone')
+        const instance = args.mr_iid != null && host.gitlab && project ? { source: gitlabInstanceId(project), project } : undefined
+        const mr = args.mr_iid != null && host.gitlab && instance ? await readMr(host.gitlab, instance, args.mr_iid, signal) : undefined
+        // Claim the PR or MR, record the report, and queue the relay atomically so a rejected claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
-          const refused = pull && claimPull(host.github, ticketId, pull)
-          if (refused) throw new Error(refused)
+          const refusedPull = pull && host.github && pullInstance && claimPull(host.github, ticketId, pullInstance, pull)
+          if (refusedPull) throw new Error(refusedPull)
+          const refusedMr = mr && host.gitlab && instance && claimMr(host.gitlab, ticketId, instance, mr)
+          if (refusedMr) throw new Error(refusedMr)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }

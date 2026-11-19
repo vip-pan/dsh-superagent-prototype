@@ -8,7 +8,7 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 - **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
 - **Optional:** a Feishu bot for chat requests.
 
-Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
+Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the accounts and the repositories they watch, Policy for allowed lists, and Execution for worker directories and commands.
 
 ### Permissions and isolation
 
@@ -22,7 +22,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
 - GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
+- One or more repositories on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
@@ -30,7 +30,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ### Agent GitHub account
 
-1. Create a GitHub user account for the agent and give it write access to the repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.
+1. Create a GitHub user account for the agent and give it write access to every repository it watches. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.
 2. Give it a GitHub CLI that uses only its own credentials:
 
    ```sh
@@ -45,6 +45,29 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    ```
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
+
+### GitLab project (optional)
+
+Work can come from GitLab projects instead of GitHub repositories, or GitLab can run beside GitHub in the same installation.
+
+1. Give the agent a GitLab account with at least Developer access (`access_level` 30) to the project, and a `glab` wrapper pinned to the instance:
+
+   ```sh
+   cat > ~/.local/bin/glab-agent <<'EOF'
+   #!/bin/sh
+   GITLAB_HOST=gitlab.example.com exec glab "$@"
+   EOF
+   chmod +x ~/.local/bin/glab-agent
+   glab-agent auth login --hostname gitlab.example.com
+   ```
+
+   Use a wrapper also to isolate the agent's login from a personal one (`GLAB_CONFIG_DIR` points `glab` at a separate configuration).
+
+2. In the panel's Sources, enable the GitLab plugin and set the account: the host (`gitlab.example.com`), the CLI, with no default project. Each listened project is its own instance, which the GitLab sub-tab's **Add project** creates and **Delete** removes: save its block `gitlab:<group>~<name>` (the project path with `/` written as `~`, such as `gitlab:apc~apc~server~apc-server`) with the project path and its own polling and observation switches. One installation listens to any number of projects this way, each with its own allow list. Workers reach GitLab through a `glab` shim that carries the host, and git through a credential helper for the host, exactly as GitHub.
+
+3. GitLab alone can carry the work: leave the GitHub CLI empty and setup resolves GitLab only. The `github` skill is then not registered, and workers open merge requests instead of pull requests. When both are configured, each is a Source of its own. A ticket that does not come from a project or repository, such as one from a chat, reports its pull or merge request against the first enabled instance of the kind. Every enabled GitLab instance's access is verified at setup; one unreadable or read-only project degrades the whole GitLab Source (and blocks setup when no GitHub repository backs the deployment) until the project is fixed or its instance disabled.
+
+POPO is connected through the `popo-robot` CLI (the `popo-robot-cli` package), which holds the robot's AppKey, AppSecret and event AES key itself (`popo-robot auth login`, or `POPO_ROBOT_*` variables or a `POPO_ROBOT_CONFIG_DIR` set by a wrapper script) so that dsh-superagent never stores them. Create the robot on the POPO open platform, subscribe to its events over the long connection with a 32-character AES key, and ask for the history-query permission (the robot's account must be put on the history API's allow list). Enter the CLI's command name or path in the POPO Source; saving runs `popo-robot whoami` to read the robot account, then restarts dsh-superagent, which keeps one `popo-robot listen` process running and receives each listened session's messages as it prints them. Workers get a `popo-robot` shim that may reach only the POPO session their ticket came from, without the administrative commands (group management, scope, cards, onboarding, credentials, raw API calls). POPO pushes a group's messages to a robot only when they mention it (the platform's SDKs know no other group event), so a listed chat or "other chats" can only receive mentions; the settings offer no all-messages mode. Direct messages are received unless switched off. GitLab access is verified at Developer level and above; below that, setup reports a read-only project.
 
 ### Feishu bot (optional)
 
@@ -144,8 +167,8 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
-2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
+1. **Sources.** On the GitHub sub-tab set the agent CLI, for example `/home/me/.local/bin/gh-agent`, then add each repository (`owner/name`) to watch. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, open the tab of each watched repository and add the GitHub accounts, and for Feishu the users, who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
    ```sh
@@ -199,25 +222,28 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
-- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `source:github`, `source:gitlab`, `source:feishu`, `source:popo`: `{"enabled": true, "config": {…}}`. The GitHub account's config has `cli` and `failuresBeforeError`; the GitLab account's has `host`, `cli` and `failuresBeforeError`. Each watched repository or project is a block of its own, `source:github:<owner>~<name>` or `source:gitlab:<group>~<name>` (the path with `/` written as `~`), with `repository`, `pollSeconds` and the switches `observeIssues`, `observePulls` (`observeMrs` for GitLab), `observeComments` and `observeCi` (`observePipelines`), off by default, which receive every new Issue, pull request and comment in it and the default branch's CI. What the agent's own account writes is not skipped wholesale, so one account can test itself: its new Issues and its comments that mention the agent are ordinary items that the Policy's list and admission table decide like anyone else's, while its replies (they carry the `<!-- dsh-superagent:… -->` delivery marker), its comments that do not mention the agent, and its own pull requests or merge requests are always skipped, so the agent never triggers itself. An Issue already read is not read again; a new instance is saved at revision 0, a repository or project can be on only while its account block is, and `DELETE settings/source:<kind>:<name>` with `{"revision": <n>}` removes one together with its Policy part. Feishu's config has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
+- `policy`: `{"rules": […], "sources": {"github:acme~widgets": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
-Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
+A watched repository or project runs only under its account: saving `source:github` or `source:gitlab` with `enabled: false` switches every instance under it off in the same save and moves their revisions on, so a save made against the old revision conflicts; saving an instance with `enabled: true` (new or existing) while its account is off returns 400 with `code: accountDisabled`. An account switched back on leaves its instances off. An instance stored on under an account that is off is read as off. Adding, removing or changing a watched repository or an account CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 
 ```sh
 api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
-  -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
+# Watch a new repository: a new instance is saved at revision 0.
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github:acme~widgets \
+  -d '{"value": {"enabled": true, "config": {"repository": "acme/widgets"}}, "revision": 0}'
+# Stop watching it.
+rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github:acme~widgets") | .revision')
+curl -s -X DELETE -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github:acme~widgets -d "{\"revision\": $rev}"
 ```
 
 ## Setup checks
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+Setup verifies the agent's GitHub account and its push access to every watched repository, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
 
 The process environment that setup writes:
 
@@ -255,8 +281,8 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The agent GitHub CLI was not found.` | Set the wrapper's absolute path, or a command name on `PATH` |
 | `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
 | `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
-| `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
-| A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
+| `The GitHub Source names no repository.` | Add the repository, `owner/name`, on the GitHub sub-tab |
+| A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket. A command that is not valid shell is refused when saved (`sh -n`), so a syntax error shows in the panel first |
 | `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
 | A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |
 | `… was not written by dsh-superagent` | Move the named file out of `<stateDir>/worker-bin` or `<stateDir>/worker-gitconfig`, or choose another `stateDir` |

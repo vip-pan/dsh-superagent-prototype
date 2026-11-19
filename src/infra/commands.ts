@@ -1,4 +1,4 @@
-/** Subprocess wrapper for running gh, lark-cli, and git commands under the deployment's configured accounts. */
+/** Subprocess wrapper for running gh, glab, lark-cli, and git commands under the deployment's configured accounts. */
 import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
@@ -7,6 +7,8 @@ import type { Deployment } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
+/** Account-level GitLab endpoints outside the configured project that the polls legitimately call. */
+const ACCOUNT_ENDPOINTS = new Set(['todos', 'user'])
 /**
  * Error thrown by Commands when a CLI invocation fails, capturing stderr diagnostics, API error codes, and exit status without echoing command arguments.
  * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures.
@@ -20,10 +22,11 @@ export function commandError(error: unknown, program = 'command'): Error {
   const exitCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'number' ? error.code : undefined
   if (error && typeof error === 'object' && 'stderr' in error && typeof error.stderr === 'string') {
     const stderr = error.stderr.trim()
-    let parsed: { error?: { code?: number; message?: string } } | undefined
+    let parsed: { error?: { code?: number | string; errcode?: number; message?: string } } | undefined
     try { parsed = JSON.parse(stderr.slice(stderr.indexOf('{'))) as typeof parsed }
     catch { /* Non-JSON CLI diagnostics are retained below. */ }
-    const code = parsed?.error?.code
+    // Most CLIs report a numeric `code`; popo-robot names the failure class in `code` and keeps the API's number in `errcode`.
+    const code = typeof parsed?.error?.code === 'number' ? parsed.error.code : parsed?.error?.errcode
     if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
     // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
     if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
@@ -63,38 +66,47 @@ export class Commands {
    */
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
   get deployment(): Deployment { return this.resolved() }
-  get repository(): string { return this.deployment.repository }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
-  async run(program: string, args: string[], cwd?: string): Promise<string> {
+  async run(program: string, args: string[], cwd?: string, env?: Record<string, string | undefined>): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...this.environment, ...env, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
-  /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
-  /**
-   * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
-   * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
-   * @throws CliError with GitHub's HTTP status as `code` on failure.
-   */
-  async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
-  async api(path: string, ...flags: string[]): Promise<string>
-  async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
-    const [path = '', ...flags] = rest
-    return schema.parse(await this.gh(['api', this.path(path), ...flags]))
+  /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `githubRepository().api`, which is restricted to one configured repository and validates output. */
+  async gh<T>(args: string[]): Promise<T> {
+    return JSON.parse(await this.run(this.ghcli(), args)) as T
   }
-  /** Fetches all pages of a GitHub API list within the configured repository, skipping items that fail schema validation. */
-  async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
-    const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
-    return validItems(item, pages.flat(), tally)
+  /** The agent's GitHub CLI path; absent while GitHub is unconfigured. */
+  private ghcli(): string { const cli = this.deployment.github?.cli; if (!cli) throw new Error('The GitHub Source is not configured; no gh calls are available'); return cli }
+  /** Binds the GitHub API to one configured repository; every call is restricted to paths within it. */
+  githubRepository(repository: string): GithubRepository {
+    const route = (path: string): string => this.githubPath(repository, path)
+    const api = async (...args: [z.ZodType<unknown>, string?, ...string[]] | [string, ...string[]]) => {
+      if (typeof args[0] === 'string') {
+        const [path, ...flags] = args as [string, ...string[]]
+        return this.run(this.ghcli(), ['api', route(path), ...flags])
+      }
+      const [schema, path = '', ...flags] = args as [z.ZodType<unknown>, string, ...string[]]
+      return schema.parse(await this.gh(['api', route(path), ...flags]))
+    }
+    return {
+      api: api as GithubRepository['api'],
+      pages: async <T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> => {
+        const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', route(path), '--paginate', '--slurp']))
+        return validItems(item, pages.flat(), tally)
+      },
+    }
   }
-  private path(path: string): string {
+  /** Resolves a GitHub API path within one repository, refusing absolute URLs and parent-directory segments. */
+  private githubPath(repository: string, path: string): string {
     const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
-    if (outside) throw new Error('GitHub calls are restricted to the configured repository')
-    return path ? `repos/${this.repository}/${path}` : `repos/${this.repository}`
+    if (outside) throw new Error('GitHub calls are restricted to configured repositories')
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || repository.split('/').some(part => /^\.+$/.test(part))) {
+      throw new Error('GitHub calls need an owner/name repository')
+    }
+    return path ? `repos/${repository}/${path}` : `repos/${repository}`
   }
   /**
    * Runs the Feishu bot's `lark-cli` and returns the JSON `data` payload.
@@ -110,6 +122,88 @@ export class Commands {
     if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
     return result.data
   }
+  /**
+   * Runs the POPO robot's `popo-robot` CLI and returns its standard output (JSON or NDJSON, as the subcommand prints it).
+   * @throws CliError whose exit code is the CLI's (5: the receiver or session was not found).
+   */
+  async popo(args: string[]): Promise<string> {
+    const bot = this.deployment.popo
+    if (!bot) throw new Error('The POPO Source has no working popo-robot CLI')
+    return this.run(bot.cli, args)
+  }
+  /** Runs the agent's GitLab CLI (`glab`) against the configured host and parses its JSON output; `glab api` prints raw JSON and has no `--jq`. */
+  async glab<T>(args: string[]): Promise<T> {
+    const account = this.deployment.gitlab
+    if (!account) throw new Error('The GitLab Source has no working CLI')
+    return JSON.parse(await this.run(account.cli, args, undefined, { GITLAB_HOST: account.host })) as T
+  }
+  gitlabProject(project: string): GitlabProject {
+    const prefix = `projects/${encodeURIComponent(project)}`
+    // Account-level endpoints (todos, user) exist only at the account root, so they skip the project prefix.
+    const route = (path: string) => this.gitlabPath(ACCOUNT_ENDPOINTS.has(path.split('?')[0] ?? '') ? path : path ? `${prefix}/${path}` : prefix)
+    const api = async (...args: [z.ZodType<unknown>, string?, ...string[]] | [string, ...string[]]) => {
+      if (typeof args[0] === 'string') {
+        const [path, ...flags] = args as [string, ...string[]]
+        return this.glab<string>(['api', route(path), ...flags])
+      }
+      const [schema, path = '', ...flags] = args as [z.ZodType<unknown>, string, ...string[]]
+      return schema.parse(await this.glab<unknown>(['api', route(path), ...flags]))
+    }
+    return {
+      api: api as GitlabProject['api'],
+      pages: async <T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> => {
+        const perPage = 100
+        const results: T[] = []
+        const separator = path.includes('?') ? '&' : '?'
+        for (let page = 1; page <= 100; page++) {
+          const batch = validItems(item, z.array(z.unknown()).parse(
+            await this.glab<unknown>(['api', `${route(path)}${separator}per_page=${perPage}&page=${page}`])), tally)
+          results.push(...batch)
+          if (batch.length < perPage) break
+        }
+        return results
+      },
+    }
+  }
+  /** Resolves and restricts GitLab API paths: account-level endpoints the polls need pass through, and every other call must name a `projects/<…>` path. */
+  private gitlabPath(path: string): string {
+    const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
+    if (outside) throw new Error('GitLab calls are restricted to configured projects')
+    const head = path.split('?')[0] ?? ''
+    if (ACCOUNT_ENDPOINTS.has(head)) return path
+    if (path === 'projects' || path.startsWith('projects/')) return path
+    throw new Error('GitLab calls must stay within a configured project')
+  }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
 }
+
+/**
+ * The bound `api`/`pages` call pair of one configured GitHub repository, as produced by `Commands.githubRepository()`.
+ * @throws CliError with GitHub's HTTP status as `code` on failure.
+ */
+export interface GithubRepository {
+  /** Calls one configured repository's GitHub API path, validating JSON output when a schema is provided or returning raw CLI output (such as raw files or `--include` headers) when omitted. */
+  api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
+  api(path: string, ...flags: string[]): Promise<string>
+  /** Fetches all pages of one configured repository's GitHub API list, skipping items that fail schema validation. */
+  pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]>
+}
+/** Shorthand for the call pair bound to one GitHub repository. */
+export type GithubCalls = GithubRepository
+
+/**
+ * The bound `api`/`pages` call pair of one configured GitLab project, as produced by `Commands.gitlabProject()`.
+ * `glab api` prints raw JSON, has no `--jq` and no pagination flags, so list callers use `pages`.
+ * @throws CliError with GitLab's HTTP status as `code` on failure.
+ */
+export interface GitlabProject {
+  /** Calls one configured project's GitLab API path, validating JSON output when a schema is provided or returning raw CLI output when omitted. */
+  api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
+  api(path: string, ...flags: string[]): Promise<string>
+  /** Fetches all pages of one configured project's GitLab API list, skipping items that fail schema validation. */
+  pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]>
+}
+
+/** Shorthand for the call pair bound to one GitLab project. */
+export type GitlabCalls = GitlabProject

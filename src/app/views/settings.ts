@@ -1,15 +1,19 @@
 /** Settings view combining versioned configuration blocks, per-source forms and policy metadata, and execution environment details. */
-import { SETUP_FIELDS } from '../../deployment.ts'
+import { INSTANCE_SETUP_FIELDS, SETUP_FIELDS } from '../../deployment.ts'
 import { KV } from '../../kv.ts'
 import { policyVersion } from '../../policy.ts'
-import type { SourceRegistry } from '../../sources/registry.ts'
+import { sourceKey, type SourceRegistry } from '../../sources/registry.ts'
 import { declaredVariables, executionRoot } from '../execution-environment.ts'
 import type { Store } from '../store.ts'
 import { problemOf, sourceHealth, type HealthMap, type SetupState } from './sources.ts'
 
 function policyOf(sources: SourceRegistry, id: string, health: HealthMap) {
-  const policy = sources.kind(id)?.policy
-  if (!policy) return {}
+  // An instance id such as github:owner~name belongs to its kind, so resolve the kind from the key rather than the whole id.
+  const { kind, name } = sourceKey(id)
+  const declared = sources.kind(kind)
+  const policy = declared?.policy
+  // The account card of a multi-instance kind carries no policy; each instance's card does.
+  if (!policy || (declared!.multi && name === undefined)) return {}
   const part = sources.policyPart(id)!
   const config = sources.instance(id)?.config ?? {}
   const sync = policy.sync && { label: policy.sync.label, ready: policy.sync.ready(part), health: health[`sync:${id}`] }
@@ -31,10 +35,14 @@ export function settingsView(store: Store, sources: SourceRegistry, health: Heal
       const kind = sources.kind(instance.kind)
       const problem = problemOf(instance.id, setup)
       const { id, title } = sourceHealth(sources, instance, health)
+      // An instance card of a multi-instance kind renders its own fields; the account card renders the account's.
+      const fields = kind && instance.id.includes(':') ? kind.multi?.fields ?? [] : kind?.fields ?? []
       return { id, kind: instance.kind, title, description: kind?.description ?? { zh: '', en: '' }, installed: instance.installed,
         value: { enabled: instance.enabled, config: instance.config }, revision: store.blockRevision(`source:${instance.id}`),
-        restarts: SETUP_FIELDS[instance.id] ?? [], fields: kind?.fields ?? [], facts: kind?.facts?.(setup.deployment) ?? {},
-        labels: store.get(KV.sources.labels(instance.id)) ?? {}, ...problem ? { problem } : {}, ...policyOf(sources, instance.id, health) }
+        restarts: SETUP_FIELDS[instance.id] ?? INSTANCE_SETUP_FIELDS[instance.kind] ?? [], fields, facts: kind?.facts?.(setup.deployment) ?? {},
+        labels: store.get(KV.sources.labels(instance.id)) ?? {}, ...problem ? { problem } : {}, ...policyOf(sources, instance.id, health),
+        // A multi-instance kind's cards carry the fields of one instance, so the panel can offer a new one before any is stored.
+        ...kind?.multi && !instance.id.includes(':') ? { instanceFields: kind.multi.fields ?? [] } : {} }
     }),
     environment: { root: executionRoot(settings, stateDir), variables: declaredVariables(sources, settings) },
   }

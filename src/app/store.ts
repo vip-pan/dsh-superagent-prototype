@@ -186,12 +186,16 @@ export class Store implements Repositories {
   settings(): Settings { return SettingsSchema.parse(this.settingsVersions.current()?.settings ?? {}) }
   /** Revision of one settings block; each configuration page saves against its own block for optimistic concurrency. */
   blockRevision(block: SettingsSave): number { return this.get(KV.settings.block(block)) ?? 0 }
-  /** Saves settings as the next revision (making it current) and increments `record.block`'s revision counter when present. */
-  saveSettings(value: unknown, record: Omit<SettingsVersion, 'revision' | 'savedAt' | 'settings'> = { source: 'internal', policyVersion: '', policyChanged: false, notified: [] }): Settings {
+  /**
+   * Saves settings as the next revision (making it current) and increments `record.block`'s revision counter when present, and
+   * those of `alsoChanged`: blocks this save changed besides `record.block`, so a draft or a save against their old revision conflicts.
+   */
+  saveSettings(value: unknown, record: Omit<SettingsVersion, 'revision' | 'savedAt' | 'settings'> = { source: 'internal', policyVersion: '', policyChanged: false, notified: [] },
+    alsoChanged: readonly SettingsSave[] = []): Settings {
     const settings = SettingsSchema.parse(value)
     return this.atomic(() => {
       this.settingsVersions.save(revision => ({ ...record, revision, savedAt: new Date().toISOString(), settings }))
-      if (record.block) this.set(KV.settings.block(record.block), this.blockRevision(record.block) + 1)
+      for (const block of [...record.block ? [record.block] : [], ...alsoChanged]) this.set(KV.settings.block(block), this.blockRevision(block) + 1)
       return settings
     })
   }

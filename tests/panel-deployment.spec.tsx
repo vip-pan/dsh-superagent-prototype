@@ -82,7 +82,9 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   expect(container.textContent).toBe('')
   server.form = fakeForm().form
   await render('page')
-  for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', '账号在 dsh-superagent 面板的来源设置里修改。']) expect(text()).toContain(fact)
+  for (const fact of ['@agent-bot', 'Widgets Bot', '账号在 dsh-superagent 面板的来源设置里修改。']) expect(text()).toContain(fact)
+  // Watched repositories belong to the GitHub Source's instances now; the Deployment keeps only the accounts.
+  expect(text()).not.toContain('acme/widgets')
   server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
   await render('page')
   expect(text()).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')

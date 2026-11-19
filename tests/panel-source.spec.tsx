@@ -7,11 +7,15 @@ import { usePanel, mount, remount, settle, all, find, tab, click, type, text, fi
 import { server, problemOf, droppedReply } from './fixtures/panel-server.ts'
 
 usePanel()
+/** The tab of a Source kind on the Source settings, which lists every kind the panel supports. */
+const kindTab = (name: string) => find(name, '.dt-subtab')
+/** The repository input of the form that adds a watched repository, which a watched card's own read-only field shares a label with. */
+const newRepository = () => document.querySelector<HTMLInputElement>('[role="dialog"] input')!
 it('shows each Source\'s state on the Source status and opens its settings from a setup problem', async () => {
   await mount()
   await click(zh['tab.source'])
   expect(document.querySelector('.dt-status-title')?.textContent).toBe(zh.statusTitle)
-  expect(all('.dt-form > .dt-list > .dt-row .dt-row-name').map(title => title.textContent)).toEqual(['飞书', 'GitHub'])
+  expect(all('.dt-form > .dt-list > .dt-row .dt-row-name').map(title => title.textContent)).toEqual(['飞书', 'GitHub', 'GitHub · widgets'])
   expect(all('.dt-form > .dt-list > .dt-row')[0]!.querySelector('.dt-row-meta')?.textContent).toBe('24 小时到达 12被过滤 2最近 ' + document.querySelector('.dt-row-meta time, .dt-row-meta .dt-lv:last-child .dt-lv-value')?.textContent)
   expect(text()).toContain(zh['sourceState.error'])
   expect(text()).toContain('socket closed')
@@ -22,7 +26,7 @@ it('shows each Source\'s state on the Source status and opens its settings from 
   await click(zh.sourceOpenSettings)
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.source'])
-  expect(all('.dt-card')[1]!.textContent).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
+  expect(all('.dt-card')[0]!.textContent).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
 })
 
 it('folds more than six chats into a line of their names', async () => {
@@ -31,6 +35,7 @@ it('folds more than six chats into a line of their names', async () => {
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('飞书'))
   const summary = all('.dt-card')[0]!.querySelector('.dt-rows-summary')!
   expect(summary.textContent).toBe(['团队群', 'oc_c1', 'oc_c2', 'oc_c3', 'oc_c4', 'oc_c5', 'oc_c6'].join('、'))
 })
@@ -39,6 +44,7 @@ it('rereads the chats the bot has joined on request and says which are new, keep
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('飞书'))
   const feishu = () => all('.dt-card')[0]!
   const button = () => [...feishu().querySelectorAll('button')].find(item => item.textContent === '刷新群列表')!
   await click([...feishu().querySelectorAll('button')].find(item => item.textContent === '添加')!)
@@ -56,15 +62,23 @@ it('rereads the chats the bot has joined on request and says which are new, keep
   expect([...document.querySelectorAll('.dt-toast')].at(-1)?.textContent).toBe('读取失败，列表保持不变：lark-cli: token expired')
   expect(button().disabled).toBe(false)
   // Only a field whose key column offers a refresh shows the button.
-  expect([...all('.dt-card')[1]!.querySelectorAll('button')].some(item => item.textContent === '刷新群列表')).toBe(false)
+  await click(kindTab('GitHub'))
+  expect([...all('.dt-card')[0]!.querySelectorAll('button')].some(item => item.textContent === '刷新群列表')).toBe(false)
 })
 
 it('renders each Source\'s settings from its kind\'s fields and saves one Source against its own revision', async () => {
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
+  // Every kind the panel supports has a tab, whether or not it is installed: GitLab has no plugin here, and says so.
+  expect(all('.dt-subtab').map(item => item.textContent)).toEqual(['GitLab', 'GitHub', 'POPO', '飞书'])
+  expect(kindTab('GitHub').getAttribute('aria-selected')).toBe('true')
+  await click(kindTab('GitLab'))
+  expect(all('.dt-card').map(card => card.querySelector('.dt-row-title')?.firstChild?.textContent)).toEqual(['GitLab'])
+  expect(text()).toContain(zh.sourceNotInstalled)
+  await click(kindTab('飞书'))
   const cards = all('.dt-card')
-  expect(cards.map(card => card.querySelector('.dt-row-title')?.firstChild?.textContent)).toEqual(['飞书', 'GitHub'])
+  expect(cards.map(card => card.querySelector('.dt-row-title')?.firstChild?.textContent)).toEqual(['飞书'])
   const feishu = cards[0]!
   expect(feishu.textContent).toContain('接收的群')
   await click([...feishu.querySelectorAll('button')].find(button => button.textContent === '添加')!)
@@ -82,24 +96,28 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
     value: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_other', listen: 'all' }],
       directMessages: false } } } })
   expect(server.settings.sources.feishu!.config).toMatchObject({ directMessages: false })
+  await click(kindTab('GitHub'))
+  // The tab holds the account's card, then a card for each watched repository, which is saved as a block of its own.
+  expect(all('.dt-card').map(card => card.querySelector('.dt-row-title')?.firstChild?.textContent)).toEqual(['GitHub', 'acme/widgets'])
   const github = all('.dt-card')[1]!
-  await click('运行来源：GitHub')
-  server.revisions['source:github'] = 5
+  await click('运行来源：acme/widgets')
+  server.revisions['source:github:acme~widgets'] = 5
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   // Another save changed nothing this draft changed, so the draft moves onto the newer revision and saves from there.
   expect(github.querySelector('.dt-savebar')?.textContent).toContain('设置已在别处修改，你的修改已合并到最新版本')
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
-  expect(server.settings.sources.github).toMatchObject({ enabled: false })
-  expect(server.revisions['source:github']).toBe(6)
+  expect(server.settings.sources['github:acme~widgets']).toMatchObject({ enabled: false })
+  expect(server.revisions['source:github:acme~widgets']).toBe(6)
 })
 
 it('shows the account each CLI signs in as, and keeps a saved CLI on screen while dsh-superagent restarts', async () => {
   await mount()
   await click(tab(zh['tab.settings']))
-  const github = all('.dt-card')[1]!
+  const github = all('.dt-card')[0]!
   expect(github.textContent).toContain('当前账号 @agent-bot')
   const labels = () => [...github.querySelectorAll('label')].map(label => label.textContent)
-  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI'])
+  // The account card holds the account's fields; the repository is a watched one, on a card of its own.
+  expect(labels()).toEqual(['智能体的 GitHub CLI'])
   expect(field<HTMLInputElement>('监听的仓库').value).toBe('acme/widgets')
   // A fact describes the saved value, so an edited CLI shows none until it is saved.
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), 'gh-other')
@@ -107,11 +125,15 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   await click(zh.discard)
   expect(github.textContent).toContain('当前账号 @agent-bot')
   await click([...github.querySelectorAll<HTMLElement>('[data-disclosure-row]')].find(row => row.textContent?.includes('高级'))!)
-  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', '轮询间隔 / 秒', '连续失败几次后报告异常'])
+  expect(labels()).toEqual(['智能体的 GitHub CLI', '连续失败几次后报告异常'])
+  await click(kindTab('飞书'))
   expect(all('.dt-card')[0]!.textContent).toContain('当前机器人 Widgets Bot')
+  await click(kindTab('GitHub'))
+  // The tab was left and entered again, so its card is a new element.
+  const account = all('.dt-card')[0]!
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), '/opt/bin/gh-agent')
-  expect(github.textContent).toContain('保存会重启 dsh-superagent：2 个进行中的派工会中断，并带恢复说明重新开始。')
-  await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(account.textContent).toContain('保存会重启 dsh-superagent：2 个进行中的派工会中断，并带恢复说明重新开始。')
+  await act(async () => { account.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(server.settings.sources.github!.config).toMatchObject({ cli: '/opt/bin/gh-agent' })
   expect(text()).toContain(zh.savedRestarting)
   // The saved value stays, and the card's fields are disabled, until the saved revision returns with the restarted dsh-superagent.
@@ -135,8 +157,8 @@ it('points a setup problem at the settings that fix it', async () => {
   await click(find(zh.problemSetup, 'button, a, [role="button"]'))
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.source'])
-  expect(all('.dt-card')[1]!.textContent).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
-  expect(scroll.mock.contexts).toContain(all('.dt-card')[1])
+  expect(all('.dt-card')[0]!.textContent).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
+  expect(scroll.mock.contexts).toContain(all('.dt-card')[0])
   delete (Element.prototype as Partial<Element>).scrollIntoView
   await click(find(zh['settingsGroup.deployment'], '.dt-settings-link'))
   expect(text()).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
@@ -159,6 +181,7 @@ it('shows a failed Feishu bot check as a problem of the Feishu Source only, with
   expect(text()).toContain(zh.problemSetupFeishu)
   expect(text()).not.toContain('飞书 来源异常')
   await click(find(zh.problemSetupFeishu, 'button, a, [role="button"]'))
+  expect(kindTab('飞书').getAttribute('aria-selected')).toBe('true')
   const feishu = all('.dt-card')[0]!
   expect(feishu.textContent).toContain('部署检查未通过：应用 cli_bot 的机器人身份状态是 missing；用 lark-cli 配置应用密钥。')
   // dsh-superagent runs meanwhile, so checking again asks first: the restart interrupts running Executor Sessions.
@@ -188,9 +211,11 @@ it('shows the Sources waiting for the deployment check, and the problem on the S
   await click(zh['tab.source'])
   const rows = all('.dt-form > .dt-list > .dt-row')
   // The GitHub Source is where the problem is fixed, so it shows the error; Feishu waits.
-  expect(rows.map(row => row.querySelector('.dt-status-text')?.textContent)).toEqual(['等待部署检查', '出错'])
+  expect(rows.map(row => row.querySelector('.dt-status-text')?.textContent)).toEqual(['等待部署检查', '出错', '出错'])
   expect(text()).not.toContain('Waiting for setup')
   expect(rows[1]!.textContent).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
+  // A watched repository shares the account's problem, as it cannot run without the account.
+  expect(rows[2]!.textContent).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
   await click(find(zh.sourceOpenSettings, '.dt-row button'))
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.source'])
 })
@@ -211,6 +236,7 @@ it('shows a refused Source save with the output of the tool that failed on its o
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('飞书'))
   const feishu = all('.dt-card')[0]!
   await type(field<HTMLInputElement>('机器人的 lark-cli'), 'lark-broken')
   await act(async () => { feishu.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
@@ -239,7 +265,8 @@ it('lists the messages a Source did not send in the last day under it, newest fi
     droppedReply('m0', 30, 'feishu', 'channelGone'), droppedReply('g0', 2, 'github', 'channelGone')]
   await mount()
   await click(zh['tab.source'])
-  const [feishu, github] = all('.dt-form > .dt-list > .dt-row')
+  // A reply on a watched repository belongs to that repository's own row.
+  const [feishu, , github] = all('.dt-form > .dt-list > .dt-row')
   const disclosure = (scope: Element) =>
     [...scope.querySelectorAll<HTMLElement>('[data-disclosure-row]')].find(row => row.textContent?.includes(zh.sourceDroppedTitle))!
   await click(disclosure(feishu!))
@@ -271,7 +298,7 @@ it('reads the settings again as soon as dsh-superagent answers after a save rest
   at({ page: 'settings', query: { group: 'source' } })
   await mount()
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), '/opt/bin/gh-agent')
-  const github = all('.dt-card')[1]!
+  const github = all('.dt-card')[0]!
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(field('智能体的 GitHub CLI').matches(':disabled')).toBe(true)
   // dsh-superagent restarts: DSH answers with empty 404s, then it answers again.
@@ -283,4 +310,142 @@ it('reads the settings again as soon as dsh-superagent answers after a save rest
   expect(server.requests.filter(request => request.path === 'settings').length).toBeGreaterThan(reads)
   expect(field('智能体的 GitHub CLI').matches(':disabled')).toBe(false)
   expect(field<HTMLInputElement>('智能体的 GitHub CLI').value).toBe('/opt/bin/gh-agent')
+})
+
+it('adds a watched repository from a form, checks it against revision 0, and refuses one already watched', async () => {
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  expect(text()).toContain(zh['sourceInstances.repository'])
+  const open = () => click(find(zh['sourceAdd.repository'], '.dt-section button'))
+  await open()
+  // A repository that is watched already is refused before anything is sent, whatever its letter case.
+  await type(newRepository(), 'Acme/Widgets')
+  await click(find(zh.sourceAddConfirm, '[role="dialog"] button'))
+  expect(document.querySelector('[role="dialog"] [role="alert"]')?.textContent).toBe('已经在监听 Acme/Widgets')
+  expect(server.requests.some(request => request.method === 'PUT')).toBe(false)
+  await type(newRepository(), 'acme/gadgets')
+  await click(find(zh.sourceAddConfirm, '[role="dialog"] button'))
+  expect(server.requests.find(request => request.method === 'PUT')).toMatchObject({ path: 'settings/source:github:acme~gadgets',
+    body: { revision: 0, value: { enabled: true, config: { repository: 'acme/gadgets' } } } })
+  expect(server.settings.sources['github:acme~gadgets']).toEqual({ enabled: true, config: expect.objectContaining({ repository: 'acme/gadgets' }) })
+  expect(text()).toContain(zh.savedRestarting)
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  await remount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  expect(all('.dt-card').map(card => card.querySelector('.dt-row-title')?.firstChild?.textContent)).toEqual(['GitHub', 'acme/widgets', 'acme/gadgets'])
+})
+
+it('shows a refused new repository in the form, and keeps the form open', async () => {
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  await click(find(zh['sourceAdd.repository'], '.dt-section button'))
+  // Another save created the same repository first: the host refuses revision 0.
+  server.settings = { ...server.settings, sources: { ...server.settings.sources, 'github:acme~gadgets': { enabled: true, config: {} } } }
+  server.revisions['source:github:acme~gadgets'] = 1
+  await type(newRepository(), 'acme/gadgets')
+  await click(find(zh.sourceAddConfirm, '[role="dialog"] button'))
+  expect(document.querySelector('[role="dialog"] [role="alert"]')?.textContent).toContain('Settings changed')
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+})
+
+it('removes a watched repository after a confirmation, against its own revision, and keeps the account card', async () => {
+  server.revisions['source:github:acme~widgets'] = 2
+  sessionStorage.setItem('dsh-superagent/draft/master/source:github:acme~widgets', JSON.stringify({ stale: true }))
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  const [account, repository] = all('.dt-card')
+  // Only a watched repository can be removed; the account is the Source's own, and stays.
+  expect([...account!.querySelectorAll('button')].some(button => button.textContent === zh.remove)).toBe(false)
+  await click([...repository!.querySelectorAll('button')].find(button => button.textContent === zh.remove)!)
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('停止监听 acme/widgets？')
+  expect(server.requests.some(request => request.method === 'DELETE')).toBe(false)
+  await click(zh.confirm)
+  expect(server.requests.find(request => request.method === 'DELETE')).toMatchObject({ path: 'settings/source:github:acme~widgets',
+    body: { revision: 2 } })
+  expect(server.settings.sources['github:acme~widgets']).toBeUndefined()
+  expect(server.settings.policy.sources['github:acme~widgets']).toBeUndefined()
+  expect(sessionStorage.getItem('dsh-superagent/draft/master/source:github:acme~widgets')).toBeNull()
+  expect(text()).toContain(zh.savedRestarting)
+})
+
+it('lists no repository yet with a way to add one, and keeps a kind whose plugin is missing as a tab saying so', async () => {
+  const { 'github:acme~widgets': _watched, ...sources } = server.settings.sources
+  server.settings = { ...server.settings, sources }
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  expect(text()).toContain(zh['sourceInstancesEmpty.repository'])
+  expect(find(zh['sourceAdd.repository'], '.dt-section button')).toBeTruthy()
+  await click(kindTab('POPO'))
+  expect(document.getElementById('dt-source-popo')?.textContent).toContain(zh.sourceNotInstalled)
+  expect(document.getElementById('dt-source-popo')?.textContent).toContain('提供POPO来源的插件没有启用')
+})
+
+it('says which repositories a Source takes down when it is switched off, and switches them off with it', async () => {
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  const [account, repository] = all('.dt-card')
+  const watching = () => repository!.querySelector<HTMLElement>('[role="switch"]')!.getAttribute('aria-checked')
+  expect(watching()).toBe('true')
+  // Nothing is said until the Source is switched off, and what is said counts the repositories that are on.
+  expect(account!.querySelector('.dt-savebar')?.textContent ?? '').not.toContain('一起关闭')
+  await click('运行来源：GitHub')
+  expect(account!.querySelector('.dt-savebar')?.textContent).toContain('保存后，其下 1 个仓库会一起关闭。')
+  await act(async () => { account!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(server.requests.find(request => request.path === 'settings/source:github')).toMatchObject({ method: 'PUT', body: { value: { enabled: false } } })
+  expect(server.settings.sources['github:acme~widgets']).toMatchObject({ enabled: false })
+  // The repository is off on screen without a reload by hand, and cannot be switched on while the Source is off.
+  await settle()
+  expect(watching()).toBe('false')
+  expect(repository!.querySelector<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(true)
+  expect(text()).toContain(zh['sourceLocked.repository'].replace('{name}', 'GitHub'))
+  expect(find(zh['sourceAdd.repository'], '.dt-section button').hasAttribute('disabled')).toBe(true)
+  // Removing one stays possible, so a repository that is no longer wanted does not wait for the Source.
+  expect([...repository!.querySelectorAll('button')].some(button => button.textContent === zh.remove && !button.disabled)).toBe(true)
+})
+
+it('lets a repository be switched on again only once its Source is on, and leaves the repositories off when the Source returns', async () => {
+  server.settings = { ...server.settings, sources: { ...server.settings.sources, github: { ...server.settings.sources.github!, enabled: false },
+    'github:acme~widgets': { ...server.settings.sources['github:acme~widgets']!, enabled: false } } }
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  const [account, repository] = all('.dt-card')
+  expect(repository!.querySelector<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(true)
+  await click('运行来源：GitHub')
+  await act(async () => { account!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(server.settings.sources.github).toMatchObject({ enabled: true })
+  await settle()
+  // The Source is on: the repository's switch is free, and it is still off until someone turns it on.
+  const toggle = () => all('.dt-card')[1]!.querySelector<HTMLButtonElement>('[role="switch"]')!
+  expect(toggle().disabled).toBe(false)
+  expect(toggle().getAttribute('aria-checked')).toBe('false')
+  expect(text()).not.toContain(zh['sourceLocked.repository'].replace('{name}', 'GitHub'))
+  expect(find(zh['sourceAdd.repository'], '.dt-section button').hasAttribute('disabled')).toBe(false)
+})
+
+it('shows the host\'s refusal of a repository switched on under a Source that is off, in the card', async () => {
+  server.settings = { ...server.settings, sources: { ...server.settings.sources, 'github:acme~widgets': { ...server.settings.sources['github:acme~widgets']!, enabled: false } } }
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await click(kindTab('GitHub'))
+  const [, repository] = all('.dt-card')
+  await click('运行来源：acme/widgets')
+  // Another save switched the Source off after this page read it: the host refuses, and says why in the interface language.
+  server.settings = { ...server.settings, sources: { ...server.settings.sources, github: { ...server.settings.sources.github!, enabled: false } } }
+  await act(async () => { repository!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(repository!.querySelector('.dt-savebar [role="alert"]')?.textContent).toBe('GitHub 来源已关闭。请先打开它，再开启其下的仓库或项目。')
 })

@@ -76,9 +76,11 @@ export const AdmissionRowSchema: z.ZodType<AdmissionRow> = z.object({ listedUnad
 export const AdmissionTableSchema = z.record(z.string(), AdmissionRowSchema)
 export const SourcePolicySchema = z.object({ allowed: z.array(AllowedSchema).default([]), admission: AdmissionTableSchema.default({}) }).catchall(z.unknown())
 export type SourcePolicy = z.infer<typeof SourcePolicySchema>
+/** A Source settings key: a plain kind such as `github`, or an instance-qualified id such as `gitlab:group~name`. */
+export const SOURCE_KEY_REGEX = /^[a-z][a-z0-9-]*(:[A-Za-z0-9_.~-]+)?$/
 export const PolicyConfigSchema = z.object({
   rules: z.array(RuleSchema).refine(rules => new Set(rules.map(rule => rule.id)).size === rules.length, 'Duplicate rule IDs').default(DEFAULT_RULES),
-  sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourcePolicySchema).default({}),
+  sources: z.record(z.string().regex(SOURCE_KEY_REGEX), SourcePolicySchema).default({}),
 }).strict()
 export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
@@ -96,13 +98,70 @@ export const ExecutorConfigSchema = z.object({
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
-export const SettingsSchema = z.object({
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+/**
+ * Split a pre-multi-instance Source (its config carried `repository` with the polling fields) into the account entry plus one
+ * instance entry `<kind>:<owner>~<name>`, and move the matching policy part. `instanceKeys` names the config keys the instance
+ * takes besides `repository`; `dropped` names account keys that no longer exist and are discarded (a stored one would fail the
+ * account's strict schema). Idempotent: once no `sources.<kind>.config.repository` remains, the input passes through untouched.
+ */
+function splitLegacy<T>(data: T, kind: string, instanceKeys: readonly string[], dropped: readonly string[]): T {
+  if (!isRecord(data) || !isRecord(data.sources)) return data
+  const stored = data.sources[kind]
+  if (!isRecord(stored) || !isRecord(stored.config)) return data
+  const { config } = stored
+  const repository = typeof config.repository === 'string' ? config.repository.trim() : ''
+  if (!repository && !dropped.some(key => key in config)) return data
+  const sources: Record<string, unknown> = { ...data.sources }
+  const account = Object.fromEntries(Object.entries(config).filter(([key]) => key !== 'repository' && !instanceKeys.includes(key) && !dropped.includes(key)))
+  sources[kind] = { ...stored, config: account }
+  const clone: Record<string, unknown> = { ...data, sources }
+  const instanceId = `${kind}:${repository.replaceAll('/', '~')}`
+  // An instance already stored for this repository (or any other instance, once the Source is split) is left alone.
+  if (repository && !Object.keys(sources).some(key => key.startsWith(`${kind}:`))) {
+    sources[instanceId] = { enabled: stored.enabled !== false,
+      config: { repository, ...Object.fromEntries(instanceKeys.filter(key => config[key] !== undefined).map(key => [key, config[key]])) } }
+    if (isRecord(data.policy) && isRecord(data.policy.sources) && kind in data.policy.sources && !(instanceId in data.policy.sources)) {
+      const { [kind]: moved, ...rest } = data.policy.sources
+      clone.policy = { ...data.policy, sources: { ...rest, [instanceId]: moved } }
+    }
+  }
+  return clone as T
+}
+/** Splits a pre-multi-instance GitLab Source (`repository` and polling fields in its config) into the account and one project instance; the removed `defaultProject` is discarded. */
+export function splitLegacyGitlab<T>(data: T): T {
+  return splitLegacy(data, 'gitlab', ['pollSeconds', 'observeIssues', 'observeMrs', 'observeComments', 'observePipelines'], ['defaultProject'])
+}
+/** Splits a pre-multi-instance GitHub Source (`repository` and polling fields in its config) into the account and one repository instance. */
+export function splitLegacyGithub<T>(data: T): T {
+  return splitLegacy(data, 'github', ['pollSeconds', 'observeIssues', 'observePulls', 'observeComments', 'observeCi'], [])
+}
+/**
+ * Drops the keys the POPO Source no longer has from a stored config, which its strict schema would refuse: the robot credentials
+ * (now held by the popo-robot CLI), the polling interval with the popo-cli path that came with it, and each chat's receive mode.
+ */
+export function dropLegacyPopo<T>(data: T): T {
+  if (!isRecord(data) || !isRecord(data.sources)) return data
+  const stored = data.sources.popo
+  if (!isRecord(stored) || !isRecord(stored.config)) return data
+  const chats = stored.config.chats
+  const listed = Array.isArray(chats) && chats.some(chat => isRecord(chat) && 'listen' in chat)
+  const old = stored.config
+  const credentials = ['appKey', 'appSecret', 'aesKey'].some(key => key in old)
+  if (!(credentials || 'pollSeconds' in old || listed)) return data
+  // A stored `cli` next to a polling interval is the popo-cli path; otherwise it is already the popo-robot CLI.
+  const { appKey: _key, appSecret: _secret, aesKey: _aes, pollSeconds: _poll, ...kept0 } = old
+  const rest = 'pollSeconds' in old ? (({ cli: _cli, ...others }) => others)(kept0) : kept0
+  const config = listed ? { ...rest, chats: (chats as unknown[]).map(chat => { if (!isRecord(chat)) return chat; const { listen: _listen, ...kept } = chat; return kept }) } : rest
+  return { ...data, sources: { ...data.sources, popo: { ...stored, config } } } as T
+}
+export const SettingsSchema = z.preprocess(data => dropLegacyPopo(splitLegacyGithub(splitLegacyGitlab(data))), z.object({
   paused: z.boolean().default(false),
-  sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
+  sources: z.record(z.string().regex(SOURCE_KEY_REGEX), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
-}).strict()
+}).strict())
 export type Settings = z.infer<typeof SettingsSchema>
 export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'

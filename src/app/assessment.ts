@@ -9,7 +9,9 @@ import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
 import { admissionContext } from '../sources/admission-context.ts'
 import { readRepositoryPath } from '../sources/github-read.ts'
+import { readGitlabRepositoryPath } from '../sources/gitlab-read.ts'
 import type { TriggerContext } from '../sources/kind.ts'
+import { sourceKey } from '../sources/registry.ts'
 import { relatedTickets } from './cards.ts'
 import { textPage } from './context.ts'
 import { AcknowledgementSchema } from './tools/tool.ts'
@@ -263,7 +265,12 @@ export class MasterAssessor implements Assessor {
         body = JSON.stringify({ images: references, next_read: next, ...result.body })
       }
       else {
-        body = await readRepositoryPath(commands, read.path!, read.resource === 'directory' ? 'directory' : 'file')
+        // A repository read follows the repository the trigger came from: GitLab tickets read the GitLab project, GitHub tickets the GitHub repository.
+        const kind = read.resource === 'directory' ? 'directory' : 'file'
+        const { project, repository } = trigger.meta
+        if (sourceKey(trigger.source).kind === 'gitlab' && typeof project === 'string' && project) body = await readGitlabRepositoryPath(commands.gitlabProject(project), read.path!, kind)
+        else if (sourceKey(trigger.source).kind === 'github' && typeof repository === 'string' && repository) body = await readRepositoryPath(commands.githubRepository(repository), read.path!, kind)
+        else throw new Error('This trigger names no repository to read from')
       }
       snapshots.set(cacheKey, body)
       return textPage(read.resource, body, read.offset, 4000)

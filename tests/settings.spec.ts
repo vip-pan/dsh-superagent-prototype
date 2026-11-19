@@ -35,10 +35,10 @@ it('refuses a save of a block that another save changed during its model or acco
   const value = github.value as { enabled: boolean; config: Record<string, unknown> }
   const moved = settings.save('source:github', { ...value, config: { ...value.config, cli: '/opt/bin/gh-other' } }, github.revision,
     'panel')
-  await settings.save('source:github', { ...value, config: { ...value.config, pollSeconds: 90 } }, github.revision, 'panel')
+  await settings.save('source:github', { ...value, config: { ...value.config, failuresBeforeError: 5 } }, github.revision, 'panel')
   accounts.resolve()
   await expect(moved).rejects.toThrow(SettingsConflict)
-  expect(store.settings().sources.github!.config).toMatchObject({ cli: value.config.cli, pollSeconds: 90 })
+  expect(store.settings().sources.github!.config).toMatchObject({ cli: value.config.cli, failuresBeforeError: 5 })
 })
 
 it('refuses a Policy sync that a Policy save outran, reports it on sync:feishu, and keeps the save', async () => {
@@ -98,4 +98,22 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   await expect(settings.sync('feishu')).rejects.toThrow(new UserError('nothingToSync', { source: 'feishu' }))
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
+})
+
+it('refuses a prepare command that is not valid shell syntax, naming the parser\'s complaint, and saves a valid multi-line one', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const executor = () => store.settings().executor
+  // Line breaks flattened into spaces leave `else` and `fi` without the separator a one-line script needs.
+  const flattened = 'if [ -n "$DSH_SUPERAGENT_GITLAB_IID" ]; then   git fetch x else   git fetch y fi'
+  await expect(settings.save('executor', { ...executor(), prepare: flattened }, store.blockRevision('executor'), 'panel'))
+    .rejects.toMatchObject({ code: 'prepareSyntax', message: expect.stringContaining('syntax error') })
+  expect(executor().prepare).toBe('')
+  const multiline = 'if [ -n "$DSH_SUPERAGENT_GITLAB_IID" ]; then\n  git fetch x\nelse\n  git fetch y\nfi'
+  await settings.save('executor', { ...executor(), prepare: multiline }, store.blockRevision('executor'), 'panel')
+  expect(executor().prepare).toBe(multiline)
+  // A command already saved is not re-checked when another field changes.
+  store.saveSettings({ ...store.settings(), executor: { ...executor(), prepare: flattened } })
+  await settings.save('executor', { ...executor(), maxWorkers: 3 }, store.blockRevision('executor'), 'panel')
+  expect(executor()).toMatchObject({ prepare: flattened, maxWorkers: 3 })
 })
