@@ -231,7 +231,8 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
     execution: expect.objectContaining({ name: expect.stringMatching(/^fix-regression-/) }), origin: expect.objectContaining({ triggerId: trigger.id }) })
   expect(ticket).not.toHaveProperty('ended')
   // The ticket's execution environment is fixed at accept time: its directory under the execution root, and the Sources' values from its Trigger.
-  expect(ticket.execution!.directory).toBe(join(directory, 'work', ticket.execution!.name))
+  expect(ticket.execution!.directory).toBe(join(directory, 'work', 'acme~widgets', ticket.execution!.name))
+  expect(ticket.repository).toBe('github:acme~widgets')
   expect(Object.fromEntries(runtime.ticketEnvironment(ticket).map(variable => [variable.key, variable.value]))).toMatchObject({ DSH_SUPERAGENT_DIR: ticket.execution!.directory, DSH_SUPERAGENT_NAME: ticket.execution!.name, DSH_SUPERAGENT_TICKET: ticket.id, DSH_SUPERAGENT_FEISHU_CHAT: CHAT, DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets', DSH_SUPERAGENT_GITHUB_ACCOUNT: 'agent-bot', DSH_SUPERAGENT_GITHUB_NUMBER: '' })
   expect(ticket.assignments).toEqual([expect.objectContaining({ state: 'running', startedAt: expect.any(String) })])
   expect(sessionId).toBe(`worker-${ticket.id}`)
@@ -436,6 +437,25 @@ it('tells live workers about policy changes instead of revoking them and restart
   expect(relays(sessionId)).toEqual([{ text: expect.stringContaining('may no longer start work') }])
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_8`)[0]).toMatchObject({ kind: 'unavailable', reason: [{ code: 'policyChanged' }] })
   expect(relays(runtime.masterId).filter(item => item.kind === 'candidate' && item.trigger_id === pending.id)).toHaveLength(1)
+})
+
+it('submits a chat request to every repository it names, one ticket and directory each, and refuses one that is not enabled', async () => {
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings, sources: { ...settings.sources,
+    'github:acme~gateway': { enabled: true, config: { repository: 'acme/gateway', tags: 'gateway, backend', calls: 'acme/widgets' } } } })
+  const trigger = feishu('1', '@bot 页面太慢，优化一下')
+  await receive(trigger)
+  const candidate = relays(runtime.masterId).find(item => item.trigger_id === trigger.id)!
+  expect(candidate.repository_rule).toMatch(/follow the chain/)
+  expect(candidate.repositories).toEqual(expect.arrayContaining([expect.objectContaining({ repository: 'acme/gateway', tags: ['gateway', 'backend'], calls: ['acme/widgets'] })]))
+  await expect(route({ kind: 'accept', trigger_id: trigger.id, title: '优化', worktree_name: worktreeName, acknowledgement: '收到', repositories: ['acme/nowhere'] })).rejects.toThrow(/not an enabled repository/)
+  const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '优化', worktree_name: worktreeName, acknowledgement: '收到', repositories: ['acme/gateway', 'acme/widgets'] })
+  const decision = runtime.store.decisions.byThread(`feishu:${CHAT}:om_1`).find(item => item.kind === 'accept')!
+  expect(decision.ticketIds).toHaveLength(2)
+  const tickets = decision.ticketIds!.map(id => runtime.store.tickets.get(id)!)
+  expect(tickets.map(ticket => ticket.repository)).toEqual(['github:acme~gateway', 'github:acme~widgets'])
+  expect(tickets.map(ticket => ticket.execution!.directory)).toEqual(tickets.map(ticket => join(directory, 'work', ticket.repository!.split(':')[1]!, ticket.execution!.name)))
+  expect(result).toBeDefined()
 })
 
 it('attaches an event to an existing open task through orchestrator_route', async () => {
@@ -1107,7 +1127,7 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   const runs = () => subprocess.spawn.mock.calls.map(([spec]) => spec as { argv: string[]; cwd: string; env?: Record<string, string> }).filter(spec => spec.argv[0] === 'sh')
   prepare('git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR" -b "agent/$DSH_SUPERAGENT_NAME"')
   const { ticket } = await acceptedTicket()
-  expect(runs()).toEqual([expect.objectContaining({ argv: ['sh', '-c', 'git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR" -b "agent/$DSH_SUPERAGENT_NAME"'], cwd: join(directory, 'work'),
+  expect(runs()).toEqual([expect.objectContaining({ argv: ['sh', '-c', 'git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR" -b "agent/$DSH_SUPERAGENT_NAME"'], cwd: join(directory, 'work', 'acme~widgets'),
     env: expect.objectContaining({ DSH_SUPERAGENT_DIR: ticket.execution!.directory, DSH_SUPERAGENT_NAME: ticket.execution!.name, DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets', DSH_SUPERAGENT_FEISHU_CHAT: CHAT }) })])
   // A retry reuses the prepared directory.
   await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'failed', summary: 'offline' })

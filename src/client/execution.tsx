@@ -72,6 +72,26 @@ function EnvironmentVariables({ groups, sources,
     </div>
   </DisclosureRow>
 }
+/** Every enabled repository with the clone its tickets are made from, tags and calls. */
+function RepositoryClones({ repositories }: { repositories: SettingsView['environment']['repositories'] }) {
+  const { t } = usePanel()
+  const [open, setOpen] = useState(false)
+  return <DisclosureRow icon={<Icon name="pull" />} title={<>{t('repositoryClones')} <span className="dt-count">{repositories.length}</span></>}
+    open={open} onToggle={() => setOpen(!open)}>
+    <div className="dt-disclosure-body">
+      <Hint>{t('repositoryClonesHint')}</Hint>
+      {repositories.length === 0 ? <Hint>{t('repositoryClonesEmpty')}</Hint> : <table className="dt-table">
+        <thead><tr><th>{t('repositoryName')}</th><th>{t('repositoryClonePath')}</th><th>{t('repositoryTags')}</th><th>{t('repositoryCalls')}</th></tr></thead>
+        <tbody>{repositories.map(item => <tr key={item.id}>
+          <td className="dt-mono">{item.repository}</td>
+          <td className="dt-mono">{item.path}{!item.configured && <span className="dt-hint"> · {t('repositoryCloneDefault')}</span>}</td>
+          <td>{item.tags.join(', ')}</td>
+          <td className="dt-mono">{item.calls.join(', ')}</td>
+        </tr>)}</tbody>
+      </table>}
+    </div>
+  </DisclosureRow>
+}
 export function ExecutionSettings() {
   const { t } = usePanel()
   const { blocks, environment, sources } = useSettings().settings
@@ -113,6 +133,7 @@ export function ExecutionSettings() {
               placeholder={t('prepareCommandEmpty')} value={value.prepare}
               onChange={event => edit({ prepare: event.target.value })} />
           </Field>
+          <RepositoryClones repositories={environment.repositories} />
           <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
           <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
             <Input className="dt-mono" value={value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}

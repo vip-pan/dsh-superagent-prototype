@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
   type Trigger } from '../core/index.ts'
 import { AdmissionDirectionSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
+import { targetRepositories } from '../repositories.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
@@ -28,6 +29,7 @@ export const AssessmentSchema = z.object({
   direction: AdmissionDirectionSchema.describe('Required for every decision.'),
   title: z.string().min(1).max(160),
   worktree_name: WorktreeNameSchema.optional(),
+  repositories: z.array(z.string()).max(12).nullish().describe('For acceptance: the repositories to submit to, one ticket each, by the card\'s names; see repository_rule.'),
   scope: z.string().max(1500),
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),
@@ -280,6 +282,11 @@ export class MasterAssessor implements Assessor {
     const { candidate } = this.evalFor(triggerId)
     signal?.throwIfAborted()
     let outcome: AssessmentOutcome = assessmentOutcome(result, this.host.settings(), candidate.strength)
+    if (outcome.kind === 'accept') {
+      const targets = targetRepositories(this.host.settings(), candidate.triggers.at(-1)?.source ?? '', result.repositories ?? [])
+      if ('error' in targets) throw new Error(targets.error)
+      if (targets.ids.length) outcome = { ...outcome, repositories: targets.ids }
+    }
     if (outcome.kind === 'accept' && outcome.acknowledgement) outcome = { ...outcome, acknowledgement: checkedImText(outcome.acknowledgement) }
     const decision = this.host.engine.decide(triggerId, { ...outcome, evalId: candidate.evalId })
     return { state: decision.kind, ...(decision.ticketId ? { ticket_id: decision.ticketId } : {}), reason: reasonText(decision.reason) }

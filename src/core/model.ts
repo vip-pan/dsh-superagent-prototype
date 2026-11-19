@@ -201,6 +201,8 @@ export interface Decision {
   reason: Reason[]
   strength: Strength
   ticketId?: string
+  /** Every ticket an accept created, `ticketId` first, when it was submitted to several repositories. */
+  ticketIds?: string[]
   mandate?: Mandate
   /** Assessor-supplied audit data (rule assessments, direction, evidence). */
   audit?: Record<string, unknown>
@@ -279,6 +281,8 @@ export interface Ticket {
   title: string
   decisionId: string
   mandate: Mandate
+  /** The repository the ticket works on, as its Source instance key such as `gitlab:group~name`; absent for a ticket accepted without repositories. */
+  repository?: string
   /** The Channels of the messages it was accepted from, which its replies go to. */
   channels: ChannelRef[]
   /** When, by whom, and how the ticket ended, with a person's or the host's reason beyond the outcome; an open ticket has none. */

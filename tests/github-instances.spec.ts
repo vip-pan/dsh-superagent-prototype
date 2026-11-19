@@ -114,10 +114,10 @@ describe('GitHub multi-instance settings', () => {
 describe('GitHub account and instance fields', () => {
   it('keeps the account to its CLI and failure threshold, and each instance to its repository and switches', () => {
     expect(githubKind.fields.map(field => field.key)).toEqual(['cli', 'failuresBeforeError'])
-    expect(githubKind.multi!.fields!.map(field => field.key)).toEqual(['repository', 'pollSeconds', 'observeIssues', 'observePulls', 'observeComments', 'observeCi'])
+    expect(githubKind.multi!.fields!.map(field => field.key)).toEqual(['repository', 'localPath', 'tags', 'calls', 'pollSeconds', 'observeIssues', 'observePulls', 'observeComments', 'observeCi'])
     expect(githubKind.health).toEqual(['github'])
     expect(githubKind.schema.parse({})).toEqual({ cli: '', failuresBeforeError: 3 })
-    expect(githubKind.multi!.schema.parse({ repository: WIDGETS })).toEqual({ repository: WIDGETS, pollSeconds: 60, observeIssues: false,
+    expect(githubKind.multi!.schema.parse({ repository: WIDGETS })).toEqual({ repository: WIDGETS, localPath: '', tags: '', calls: '', pollSeconds: 60, observeIssues: false,
       observePulls: false, observeComments: false, observeCi: false })
     // Neither shape accepts the other's fields.
     expect(() => githubKind.schema.parse({ repository: WIDGETS })).toThrow()
@@ -137,7 +137,7 @@ describe('GitHub account and instance fields', () => {
     const view = settingsView(store, registry, {}, {}, '/srv')
     expect(view.sources.map(source => source.id)).toEqual(['github', 'github:acme~widgets', 'github:acme~gadgets'])
     expect(view.sources[0]!.fields.map(field => field.key)).toEqual(['cli', 'failuresBeforeError'])
-    expect(view.sources[1]!.fields.map(field => field.key)).toEqual(['repository', 'pollSeconds', 'observeIssues', 'observePulls', 'observeComments', 'observeCi'])
+    expect(view.sources[1]!.fields.map(field => field.key)).toEqual(['repository', 'localPath', 'tags', 'calls', 'pollSeconds', 'observeIssues', 'observePulls', 'observeComments', 'observeCi'])
     expect(view.sources[1]!.value.config).toMatchObject({ repository: WIDGETS, pollSeconds: 60 })
     expect(view.sources[2]!.value).toMatchObject({ enabled: false, config: { repository: GADGETS } })
     unregister()
