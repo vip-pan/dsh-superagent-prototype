@@ -9,7 +9,8 @@ import { server } from './fixtures/panel-server.ts'
 
 // The GitHub Source is multi-instance: each watched repository is a Source of its own, with its own Policy part and settings card.
 const WIDGETS = githubInstanceId('acme/widgets')
-const WIDGETS_TAB = 'GitHub · widgets'
+// The Policy tabs are the Source kinds; a multi-instance kind shows its watched repositories as rows under its tab, with their count.
+const GITHUB_TAB = 'GitHub 1'
 
 usePanel()
 it('opens the Decisions under Policy from the flow line with their reasons, Decisions that start work first, filterable by kind',
@@ -39,8 +40,8 @@ it('keeps a Policy draft across remounts, and merges another save into it sender
   await mount()
   await click(zh['tab.eval'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
-  // The Policy lists the Sources that have a part: Feishu, and each watched repository, not the GitHub account.
-  expect(all('.dt-subtab').map(tab => tab.textContent)).toEqual(['飞书', WIDGETS_TAB])
+  // The Policy has a tab per Source kind that has a part: Feishu, and GitHub with its one watched repository, not the GitHub account.
+  expect(all('.dt-subtab').map(tab => tab.textContent)).toEqual(['飞书', GITHUB_TAB])
   await addUser()
   expect(text()).toContain(zh.draftKept)
   await remount()
@@ -71,11 +72,46 @@ it('keeps the Policy to its rules and each Source\'s part, in that Source\'s own
   for (const gone of ['自动合并', '行数阈值', '成员', '计入策略版本']) expect(text()).not.toContain(gone)
   expect(all('.dt-lv').map(item => item.textContent)[0]).toBe('策略版本 abcdef12')
   expect(text()).toContain('名单内的人 @ 机器人或私聊机器人，总是明确的请求')
-  await click(find(WIDGETS_TAB, '.dt-subtab'))
+  await click(find(GITHUB_TAB, '.dt-subtab'))
   expect(text()).toContain('能发起工作的 GitHub 账号')
   expect(text()).toContain('名单里的账号在 Issue 或评论里 @ 智能体的账号。')
   // A saved account shows as its id; only a row being added is a field.
   expect(all('.dt-part .dt-rows-item .dt-row-label').map(label => label.textContent)).toEqual(['alice'])
+})
+
+it('keeps a second repository collapsed under the same tab until it is opened', async () => {
+  const GADGETS = githubInstanceId('acme/gadgets')
+  server.settings.sources[GADGETS] = { ...server.settings.sources[WIDGETS]!, config: { ...server.settings.sources[WIDGETS]!.config,
+    repository: 'acme/gadgets' } }
+  server.settings.policy.sources[GADGETS] = { allowed: [{ id: 'bob' }, { id: 'carol' }], admission: {} }
+  await mount()
+  await click(tab(zh['tab.settings']))
+  await click(find(zh['term.eval'], '.dt-settings-link'))
+  expect(all('.dt-subtab').map(item => item.textContent)).toEqual(['飞书', 'GitHub 2'])
+  await click(find('GitHub 2', '.dt-subtab'))
+  const rows = () => all('.dt-instances > .dt-disclosure')
+  expect(rows().map(row => [row.querySelector('.dt-disclosure-title')?.textContent, row.hasAttribute('data-open')]))
+    .toEqual([['acme/widgets', true], ['acme/gadgets', false]])
+  expect(rows()[1]!.textContent).toContain(zh.policyAllowedCount.replace('{count}', '2'))
+  await click(rows()[1]!.querySelector<HTMLElement>('[data-disclosure-row]')!)
+  expect(all('.dt-part')).toHaveLength(2)
+})
+
+it('lists a multi-instance kind\'s repositories as collapsible rows under one tab, the first open, with how many accounts each allows', async () => {
+  await mount()
+  await click(tab(zh['tab.settings']))
+  await click(find(zh['term.eval'], '.dt-settings-link'))
+  await click(find(GITHUB_TAB, '.dt-subtab'))
+  const rows = () => all('.dt-instances > .dt-disclosure')
+  expect(rows().map(row => row.querySelector('.dt-disclosure-title')?.textContent)).toEqual(['acme/widgets'])
+  expect(rows()[0]!.hasAttribute('data-open')).toBe(true)
+  expect(all('.dt-part')).toHaveLength(1)
+  await click(rows()[0]!.querySelector<HTMLElement>('[data-disclosure-row]')!)
+  expect(rows()[0]!.hasAttribute('data-open')).toBe(false)
+  expect(all('.dt-part')).toHaveLength(0)
+  expect(rows()[0]!.textContent).toContain(zh.policyAllowedCount.replace('{count}', '1'))
+  await click(rows()[0]!.querySelector<HTMLElement>('[data-disclosure-row]')!)
+  expect(all('.dt-part')).toHaveLength(1)
 })
 
 it('opens the rule list for an invalid field inside it only', async () => {
@@ -226,7 +262,7 @@ it('lists each Source\'s bots next to its people and saves them, and sets the Gi
   const bot = await add('消息可以成为候选的机器人')
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="App ID 或 open_id"]')!, 'cli_reviewer')
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="名字"]')!, '评审机器人')
-  await click(find(WIDGETS_TAB, '.dt-subtab'))
+  await click(find(GITHUB_TAB, '.dt-subtab'))
   expect(lists()).toEqual(['能发起工作的 GitHub 账号', '评论可以成为候选的机器人'])
   await type((await add('评论可以成为候选的机器人')).querySelector<HTMLInputElement>('input[aria-label="账号"]')!, 'dependabot[bot]')
   // Until the GitHub Source receives the repository's Issues, pull requests, comments or CI, only messages that mention the agent arrive.
@@ -254,7 +290,7 @@ it('shows the GitHub Source\'s switches for what it receives across the reposito
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(server.settings.sources[WIDGETS]!.config).toMatchObject({ observeIssues: true, observeComments: true, observeCi: true })
   await click(find(en['term.eval'], '.dt-settings-link'))
-  await click(find(WIDGETS_TAB, '.dt-subtab'))
+  await click(find(GITHUB_TAB, '.dt-subtab'))
   const rows = all('.dt-admission tbody tr').map(row => [row.querySelector('.dt-admission-scope')!.firstChild?.textContent,
     row.querySelectorAll('select').length])
   expect(rows).toEqual([['New Issues', 3], ['New pull requests', 1], ['Comments', 3], ['Default branch CI', 1]])

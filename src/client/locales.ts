@@ -269,6 +269,7 @@ const TEXT = {
   'decisionFilter.all': ['全部', 'All'],
   lastDayOnly: ['仅过去 24 小时到达的触发 ✕', 'Triggers from the last 24 hours only ✕'],
   evalStatusIntro: ['评估按策略对触发做出的决定，每条写明理由。', 'The Decisions Eval made on Triggers under the Policy, each with its reason.'],
+  policyAllowedCount: ['{count} 个账号可发起', '{count} allowed'],
   policyPerSource: ['在各来源上', 'On each Source'],
   policyPerSourceHint: ['策略在每个来源上的部分：谁能通过这个来源发起工作，用这个来源自己的身份；不同来源之间不对应。要让智能体知道同一个人在各来源的账号，写在提示词里。', 'The Policy\'s part on each Source: who may originate work through it, in that Source\'s own identities, with no mapping between Sources. To tell the agents a person\'s account on each Source, write it in the prompts.'],
   explicitRequest: ['明确的请求', 'Explicit request'],
