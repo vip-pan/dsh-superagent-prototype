@@ -173,9 +173,15 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
   }
   const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
   const fallback = catalog?.default
+  const describe = (route: { provider?: string; model?: string; reasoningEffort?: string }) => (route.provider || '?') + ' / ' + (route.model || '?')
+    + (route.reasoningEffort ? ' · ' + route.reasoningEffort : '')
+  // Show the route actually in effect: the configured override when any field is set, otherwise the inherited DSH default.
+  const overridden = !!(current.provider.trim() || current.model.trim() || current.effort.trim())
+  const effective = overridden ? describe({ provider: current.provider.trim() || fallback?.provider, model: current.model.trim() || fallback?.model,
+    reasoningEffort: current.effort.trim() || undefined }) : fallback ? describe(fallback) : undefined
   return <div className="dt-model">
-    <Hint>{fallback ? t('defaultModel', { model: fallback.provider + ' / ' + fallback.model + (fallback.reasoningEffort
-      ? ' · ' + fallback.reasoningEffort : '') }) : t('defaultModelUnavailable')}</Hint>
+    <Hint>{effective ? t(overridden ? 'modelEffective' : 'defaultModel', { model: effective, ...overridden && fallback ? { fallback: describe(fallback) } : {} })
+      : t('defaultModelUnavailable')}</Hint>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
     <div className="dt-grid3">
       <Field label={t('modelProvider')}><ModelOptionInput value={current.provider} placeholder={t('modelInherit')}
