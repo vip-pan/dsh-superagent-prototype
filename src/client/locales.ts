@@ -422,6 +422,7 @@ const TEXT = {
   // Settings, drafts, and configuration history
   policyVersionUnrecorded: ['最近的保存记录里没有策略版本 {version}：它来自更早的保存、首次启动时的设置或更早的数据。', 'The recent saves do not include Policy version {version}: an older save, the settings at the first start, or older data made it.'],
   defaultModel: ['DSH 当前默认：{model}', 'DSH default: {model}'],
+  modelEffective: ['当前生效：{model}（DSH 默认：{fallback}）', 'In effect: {model} (DSH default: {fallback})'],
   defaultModelUnavailable: ['DSH 默认模型暂不可用', 'DSH default model unavailable'],
   modelProvider: ['服务商', 'Provider'],
   modelName: ['模型', 'Model'],
