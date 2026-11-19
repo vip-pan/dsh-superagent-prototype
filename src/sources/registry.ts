@@ -74,20 +74,14 @@ export class SourceRegistry implements SourceScope {
   }
   /**
    * The stored instance a ticket from `source` belongs to. For multi-instance kinds a foreign or missing source maps to
-   * the account's default instance (`defaultProject`) or, failing that, the first stored one — so chat tickets still land in one project.
+   * the first enabled instance or, failing that, the first stored one — so chat tickets still land in one repository.
    */
   instanceIdFor(source: string | undefined, kindId: string, settings = this.settings()): string | undefined {
     const kind = this.kinds.get(kindId)
     if (!kind?.multi) return kindId
     const stored = this.instanceIds(kindId, settings)
     if (source && sourceKey(source).kind === kindId) return stored.includes(source) ? source : undefined
-    const account = this.resolve(kind, settings.sources[kindId]).config as Record<string, unknown>
-    const project = typeof account.defaultProject === 'string' ? account.defaultProject : ''
-    if (project) {
-      const wanted = this.resolveMany(kind, settings).find(instance => (instance.config as Record<string, unknown>).repository === project)
-      if (wanted) return wanted.id
-    }
-    return stored[0]
+    return stored.find(id => this.resolveOne(kind, id, settings).enabled) ?? stored[0]
   }
   /** Every registered kind's account instance plus each stored multi-instance entry, ordered by ID, followed by stored instances whose kind is not installed. */
   instances(settings = this.settings()): (SourceInstance & { installed: boolean })[] {
@@ -220,7 +214,9 @@ export class SourceRegistry implements SourceScope {
   private resolveOne(kind: AnySourceKind, id: string, settings: Settings): SourceInstance {
     const stored = settings.sources[id]
     const parsed = kind.multi!.schema.safeParse(stored?.config ?? {})
-    return { id, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? true), config: parsed.success ? parsed.data : kind.multi!.schema.parse({}) }
+    // An instance runs only under its running account, whatever it is stored as.
+    const running = settings.sources[kind.kind]?.enabled ?? true
+    return { id, kind: kind.kind, enabled: parsed.success && running && (stored?.enabled ?? true), config: parsed.success ? parsed.data : kind.multi!.schema.parse({}) }
   }
   /** Resolves every stored multi-instance entry of `kind` in stored order. */
   private resolveMany(kind: AnySourceKind, settings: Settings, filter: (id: string) => boolean = () => true): SourceInstance[] {

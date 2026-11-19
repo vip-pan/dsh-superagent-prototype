@@ -5,13 +5,13 @@ import { sameName } from '../infra/text.ts'
 import { GitlabAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { branchPipelines, mrPipelines, pipelineCounts, pipelineFact, pipelineFailures, pipelineSummary, gitlabThreadContext } from './gitlab-read.ts'
-import { branchCiTrigger, gitlabAddress, gitlabInstanceId, gitlabRepositoryOf, issueTrigger, IssueSchema, mrTrigger, MergeRequestSchema, noteTrigger,
+import { branchCiTrigger, gitlabAddress, gitlabInstanceId, gitlabRepositoryOf, issueTrigger, IssueSchema, mentions, mrTrigger, MergeRequestSchema, noteTrigger,
   NoteSchema, pipelineCiTrigger, SOURCE, type GitlabKind, type Instance } from './gitlab-trigger.ts'
 import { gitlabLink, sendGitlab } from './gitlab-channel.ts'
 import { observeMr, mrsOf, readMr, type Mr } from './gitlab-pull.ts'
 import { health, sourceContext, type Health, type SourceContext, type SourceHost } from './host.ts'
 import { KV } from '../kv.ts'
-import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
+import { cursorAt, ownSkipped, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
 import { pollFailure } from './github.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import { z } from 'zod'
@@ -53,8 +53,6 @@ export const gitlabKind: SourceKind<GitlabAccountConfig, GitlabInstanceConfig> =
       hint: { zh: 'GitLab 实例的域名，例如 gitlab.example.com。保存时检查智能体账号能否登录，然后重启 dsh-superagent。', en: 'The GitLab instance domain, for example gitlab.example.com. Saving checks that the agent account can sign in, then restarts dsh-superagent.' } },
     { key: 'cli', type: 'text', label: { zh: '智能体的 GitLab CLI', en: 'Agent GitLab CLI' },
       hint: { zh: '命令名或绝对路径，通常是用 GITLAB_HOST 登录智能体账号的 glab 包装脚本。智能体以它登录的账号行事，执行器以 glab 调用它。保存时检查它登录的账号，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a glab wrapper signed in to the agent account for this host. The agent acts as the account it is signed in to, and the Executor calls it as glab. Saving checks the signed-in account, then restarts dsh-superagent.' } },
-    { key: 'defaultProject', type: 'text', pattern: '[A-Za-z0-9_.\\-]+(?:/[A-Za-z0-9_.\\-]+)+', label: { zh: '默认项目', en: 'Default project' },
-      hint: { zh: 'group/project 完整路径。其他来源（聊天）开出的工单在这个项目上工作；留空时用第一个实例。改它不触发重启，实例集变化才会。', en: 'The full group/project path. Tickets opened through other Sources (chat) work on this project; empty falls back to the first instance. Changing it does not restart; the instance set does.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
   ],
   multi: {
@@ -260,7 +258,9 @@ async function readStream(ctx: SourceContext, round: Round, instance: Instance, 
   for (const item of items) {
     // Stopping mid-stream aborts before advancing the cursor so unread items are retried.
     if (stopped(ctx, round, instance.source)) throw new Error('The GitLab Source stopped during the poll')
-    if (sameName(item.author.username ?? '', login)) continue
+    const mine = sameName(item.author.username ?? '', login)
+    // The comment streams list the Issues and merge requests whose notes changed; each note is judged on its own author in `intakeNotes`.
+    if (id === 'issues' || id === 'mrs' ? ownSkipped(mine, item.body, id === 'issues' ? 'issue' : 'change') : false) continue
     if (id === 'issues' || id === 'mrs') {
       if (!fresh(item.created_at)) continue
       await ctx.receive(id === 'issues' ? issueTrigger(instance, item, login) : mrTrigger(instance, item, login))
@@ -378,14 +378,15 @@ async function readNotified(ctx: SourceContext, round: Round, instance: Instance
   if (kind === 'issue') {
     const issue = await calls.api(IssueSchema, `issues/${iid}`)
     // An Issue opened by someone other than the agent since the cursor brings its body so a mention in it reaches the gate.
-    const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.author.username ?? '', login)
+    const opened = Date.parse(issue.created_at) >= Date.parse(since)
+      && !ownSkipped(sameName(issue.author.username ?? '', login), issue.body, 'issue')
     if (opened) await ctx.receive(issueTrigger(instance, issue, login))
     await intakeNotes(ctx, round, instance, { kind: 'issue', iid, url: issue.web_url }, since)
     nameThread(ctx, instance, 'issue', iid, issue.title)
   } else {
     const mr = await mergeRequest(ctx, round, instance, iid)
     // Emit an MR description trigger for MRs opened since the cursor; its ID is the same as the one produced by the project MR stream.
-    if (mr.created_at && Date.parse(mr.created_at) >= Date.parse(since) && !sameName(mr.author.username ?? '', login)) {
+    if (mr.created_at && Date.parse(mr.created_at) >= Date.parse(since) && !ownSkipped(sameName(mr.author.username ?? '', login), mr.body, 'change')) {
       await ctx.receive(mrTrigger(instance, { iid, title: mr.title ?? '', body: mr.body, author: mr.author, created_at: mr.created_at,
         web_url: mr.web_url, source_branch: mr.source_branch ?? undefined }, login))
     }
@@ -405,7 +406,7 @@ function mergeRequest(ctx: SourceContext, round: Round, instance: Instance, iid:
   }
   return read
 }
-/** Reads a thread's notes since `since`, skipping system notes and the agent's own; each becomes a note Trigger. */
+/** Reads a thread's notes since `since`, skipping system notes and the agent's own (see `ownSkipped`); each becomes a note Trigger. */
 async function intakeNotes(ctx: SourceContext, round: Round, instance: Instance, ref: { kind: GitlabKind; iid: number; url?: string; mrAuthor?: string }, since: string): Promise<void> {
   const calls = ctx.commands.withSignal(round.signal).gitlabProject(instance.project)
   const { login } = ctx.deployment.gitlab!
@@ -417,7 +418,7 @@ async function intakeNotes(ctx: SourceContext, round: Round, instance: Instance,
     const timestamp = Date.parse(note.updated_at ?? note.created_at ?? '')
     if (!Number.isFinite(timestamp) || timestamp < Date.parse(since)) continue
     if (note.system) continue
-    if (sameName(note.author.username ?? '', login)) continue
+    if (ownSkipped(sameName(note.author.username ?? '', login), note.body, 'comment', mentions(note.body ?? '', login))) continue
     const trigger = noteTrigger(instance, note, ref, login)
     if (trigger.text) await ctx.receive(trigger)
   }

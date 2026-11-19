@@ -12,8 +12,7 @@ import type { SourceRegistry } from './registry.ts'
 
 const PopoConfigSchema = PopoBotSchema.extend({
   readPageSize: z.number().int().min(1).max(50).default(20),
-  pollSeconds: z.number().int().min(60).max(3600).default(60),
-  chats: z.array(z.object({ chatId: z.string().regex(/^[\w@.\-]{1,64}$/), name: z.string().trim().max(60).optional(), listen: z.enum(['mentions', 'all']) }).strict())
+  chats: z.array(z.object({ chatId: z.string().regex(/^[\w@.\-]{1,64}$/), name: z.string().trim().max(60).optional() }).strict())
     .refine(chats => new Set(chats.map(chat => chat.chatId)).size === chats.length, 'Duplicate chat IDs')
     .default([]),
   directMessages: z.boolean().default(true),
@@ -23,22 +22,20 @@ export type PopoConfig = z.infer<typeof PopoConfigSchema>
 export const popoKind: SourceKind<PopoConfig> = {
   kind: SOURCE,
   title: { zh: 'POPO', en: 'POPO' },
-  description: { zh: '轮询下列群和私聊的消息，接收私聊与群消息并发起工单。', en: 'Polls messages of the listed chats and direct messages, receiving them to originate work.' },
+  description: { zh: '通过 popo-robot CLI 以机器人身份接入 POPO，接收私聊与群里的消息并发起工单。', en: 'Connects to POPO as a robot through the popo-robot CLI, receiving direct and group messages to originate work.' },
   schema: PopoConfigSchema,
   fields: [
-    { key: 'cli', type: 'text', label: { zh: '账号的 popo-cli', en: 'Account popo-cli' },
-      hint: { zh: '命令名或绝对路径，指向登录了智能体账号的 popo-cli；执行器以 popo-cli 调用它。保存时读取账号，然后重启 dsh-superagent。', en: 'A command name or absolute path of a popo-cli signed in to the agent account; the Executor calls it as popo-cli. Saving reads the account, then restarts dsh-superagent.' } },
+    { key: 'cli', type: 'text', label: { zh: '机器人的 popo-robot CLI', en: 'Robot popo-robot CLI' },
+      hint: { zh: '命令名或绝对路径，指向已配置好机器人凭据的 popo-robot（可以是带 POPO_ROBOT_CONFIG_DIR 的包装脚本）；凭据只在 CLI 里，不进 dsh-superagent。保存时用 whoami 读取机器人账号，然后重启 dsh-superagent。', en: 'A command name or absolute path of a popo-robot with the robot\'s credentials configured (a wrapper that sets POPO_ROBOT_CONFIG_DIR works); the credentials stay in the CLI, never in dsh-superagent. Saving reads the robot account with whoami, then restarts dsh-superagent.' } },
     { key: 'chats', type: 'rows', label: { zh: '接收的群', en: 'Chats' },
-      hint: { zh: '“仅订阅”只接收已有工单的会话的消息；“全部消息”也接收其余消息，评估可以按规则从中推断工作。', en: '"Subscribed only" receives messages of sessions that have Tickets; "All" also receives the rest, from which Eval may infer work under the rules.' },
+      hint: { zh: 'POPO 只把群里 @ 机器人的消息推给机器人，群里的其他消息收不到，所以没有“全部消息”可选。这里列出的群，机器人被 @ 时一定接收；机器人需要先被加进群。', en: 'POPO pushes a group\'s messages to the robot only when they mention it; the others never arrive, so there is no "all messages" choice. A listed chat always receives the messages that mention the robot, which must have been added to the chat first.' },
       columns: [
-        { key: 'chatId', type: 'text', label: { zh: '群', en: 'Chat' }, pattern: '[\\w@.\\-]{1,64}' },
-        { key: 'listen', type: 'select', label: { zh: '接收', en: 'Receive' }, options: [{ value: 'mentions', label: { zh: '仅订阅', en: 'Subscribed only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
+        { key: 'chatId', type: 'text', label: { zh: '群号', en: 'Chat' }, pattern: '[\\w@.\\-]{1,64}' },
       ] },
-    { key: 'otherChats', type: 'select', label: { zh: '其他群', en: 'Other chats' }, options: [{ value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅订阅', en: 'Subscribed only' } }],
-      hint: { zh: '账号已加入、但没列在上面的群。“仅订阅”接收那里已有工单的会话的消息；谁的消息能发起工作看策略里的准入。', en: 'Chats the account has joined that are not listed above. "Subscribed only" receives messages of sessions that have Tickets; whose messages may originate work is the Policy\'s admission.' } },
+    { key: 'otherChats', type: 'select', label: { zh: '其他群', en: 'Other chats' }, options: [{ value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '接收 @', en: 'Mentions' } }],
+      hint: { zh: '机器人已被加入、但没列在上面的群。“接收 @”接收那里 @ 机器人的消息；谁的消息能发起工作看策略里的准入。', en: 'Chats the robot has been added to that are not listed above. "Mentions" receives the messages there that mention the robot; whose messages may originate work is the Policy\'s admission.' } },
     { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每页消息数', en: 'Messages per page' }, hint: { zh: '智能体读取会话时，每页的消息数。', en: 'Messages per page when agents read a session.' } },
-    { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Poll interval / s' }, hint: { zh: '两次消息搜索之间的最小间隔。', en: 'The minimum interval between message searches.' } },
   ],
   health: ['popo'],
   scope({ meta }, settings) {
@@ -46,7 +43,7 @@ export const popoKind: SourceKind<PopoConfig> = {
     if (!ref) return { listened: false, reason: 'session_unknown' }
     if (!ref.group) return settings.directMessages ? { listened: true, observed: false, row: 'direct' } : { listened: false, reason: 'direct_messages_not_allowed' }
     const chat = settings.chats.find(item => item.chatId === ref.session)
-    if (chat) return { listened: true, observed: chat.listen === 'all', row: chat.chatId }
+    if (chat) return { listened: true, observed: false, row: chat.chatId }
     return settings.otherChats === 'mentions' ? { listened: true, observed: false, row: 'other' } : { listened: false, reason: 'chat_not_allowed' }
   },
   // A reply goes only to a session the Source still receives.
@@ -76,11 +73,11 @@ export const popoKind: SourceKind<PopoConfig> = {
     explicit: { zh: '名单内的人私聊账号，总是明确的请求，不需要配置。', en: 'Someone on the list who messages the account directly always makes an explicit request; that needs no setting.' },
     rows(settings) {
       const parsed = PopoConfigSchema.parse(settings)
-      const subscribed = { zh: '仅订阅', en: 'Subscribed only' }
+      const mentions = { zh: '接收 @', en: 'Mentions' }
       return [
-        ...parsed.chats.map(chat => ({ id: chat.chatId, label: chat.name || chat.chatId, note: chat.listen === 'all' ? { zh: '全部消息', en: 'All' } : subscribed,
-          cells: { listedUnaddressed: chat.listen === 'all', unlistedAddressed: true, unlistedUnaddressed: chat.listen === 'all' } })),
-        { id: 'other', label: { zh: '其他群', en: 'Other chats' }, note: parsed.otherChats === 'mentions' ? subscribed : { zh: '不接收', en: 'Not received' },
+        ...parsed.chats.map(chat => ({ id: chat.chatId, label: chat.name || chat.chatId, note: mentions,
+          cells: { listedUnaddressed: false, unlistedAddressed: true, unlistedUnaddressed: false } })),
+        { id: 'other', label: { zh: '其他群', en: 'Other chats' }, note: parsed.otherChats === 'mentions' ? mentions : { zh: '不接收', en: 'Not received' },
           cells: { listedUnaddressed: false, unlistedAddressed: parsed.otherChats === 'mentions', unlistedUnaddressed: false } },
         { id: 'direct', label: { zh: '私聊', en: 'Direct messages' }, note: parsed.directMessages ? { zh: '接收', en: 'Received' } : { zh: '不接收', en: 'Not received' },
           cells: { listedUnaddressed: false, unlistedAddressed: parsed.directMessages, unlistedUnaddressed: false } },
@@ -89,12 +86,12 @@ export const popoKind: SourceKind<PopoConfig> = {
   },
   environment: {
     variables: [
-      { key: 'DSH_SUPERAGENT_POPO_ACCOUNT', description: { zh: 'POPO 账号；popo-cli 以它行事', en: 'The POPO account; popo-cli acts as it' } },
+      { key: 'DSH_SUPERAGENT_POPO_ACCOUNT', description: { zh: 'POPO 机器人账号', en: 'The POPO robot account' } },
       { key: 'DSH_SUPERAGENT_POPO_CHAT', description: { zh: '接下工单的 POPO 会话；工单不是从 POPO 来的时候为空', en: 'The POPO session that started the ticket; empty when the ticket did not start on POPO' } },
     ],
     values: ({ deployment, trigger }) => ({ DSH_SUPERAGENT_POPO_ACCOUNT: deployment.popo?.uid ?? '', DSH_SUPERAGENT_POPO_CHAT: trigger?.source === SOURCE ? String(trigger.meta.session ?? '') : '' }),
   },
-  facts: (deployment): Record<string, Localized | string> => deployment?.popo ? { cli: { zh: `当前账号 ${deployment.popo.uid}`, en: `Current account ${deployment.popo.uid}` } } : {},
+  facts: (deployment): Record<string, Localized | string> => deployment?.popo ? { cli: { zh: `当前机器人 ${deployment.popo.uid}`, en: `Current robot ${deployment.popo.uid}` } } : {},
 }
 /** Returns the POPO Source's settings, falling back to schema defaults while the POPO plugin is disabled. */
 export const popoSettings = (sources: SourceRegistry): PopoConfig => sources.instance<PopoConfig>(SOURCE)?.config ?? PopoConfigSchema.parse({})

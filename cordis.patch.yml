@@ -13,7 +13,7 @@
     # Optional GitLab Source; requires a glab CLI signed in to the agent account and a project after enabling.
     - id: dsh-superagent-gitlab
       name: dsh-superagent/gitlab-watch
-    # Optional POPO Source; requires a popo-cli signed in to the agent account after enabling.
+    # Optional POPO Source; needs the popo-robot CLI (which holds the robot's credentials) entered in its settings.
     - id: dsh-superagent-popo
       name: dsh-superagent/popo-watch
     # The agent preset of every Executor Session (WORKER_PRESET in src/app/sessions.ts); the main Session has its own, below.

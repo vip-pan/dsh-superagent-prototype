@@ -17,7 +17,7 @@ import type { Machine } from '../src/deployment.ts'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { TextCache } from '../src/app/cache.ts'
 import { KV } from '../src/kv.ts'
-import { SettingsSchema, policyVersion, type SettingsOrigin } from '../src/policy.ts'
+import { SettingsSchema, policyVersion, type SettingsBlock, type SettingsOrigin } from '../src/policy.ts'
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
@@ -25,7 +25,7 @@ import { CliError, Commands } from '../src/infra/commands.ts'
 import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
 import { feishuTrigger } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
-import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
+import { commentTrigger, githubChannel, githubInstanceId } from '../src/sources/github-trigger.ts'
 import { IM_WORDS } from '../src/infra/text.ts'
 import { observePull, pullOf } from '../src/sources/github-pull.ts'
 import { credentialHelper, workerGitConfig } from '../src/infra/environment.ts'
@@ -93,13 +93,20 @@ const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
   const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
   return { done: Promise.resolve({ exitCode: answer instanceof Error ? 1 : 0, signal: null }), collected: { stdout: reader(answer instanceof Error ? '' : answer), stderr: reader(answer instanceof Error ? answer.message : '') } }
 }) }
-/** Source account overrides for test setup; `feishu: null` disables the Feishu source. */
-interface Accounts { github?: Record<string, unknown>; feishu?: Record<string, unknown> | null }
+/** The GitHub repository instance the tests listen to: `github:acme~widgets`. */
+const INSTANCE = { source: githubInstanceId('acme/widgets'), repository: 'acme/widgets' }
+/** The context reporting through the instance's own health entry, claimed on first use as the Source does. */
+function instanceContext() { runtime.sources.instanceHealth(INSTANCE.source); return runtime.context({ kind: 'github', health: [INSTANCE.source] }) }
+/** The key of an Issue or PR Thread of that instance. */
+const ghThread = (number: number): string => `${INSTANCE.source}:${number}`
+/** Source account overrides for test setup; `feishu: null` disables the Feishu source, and `instance: null` leaves GitHub without a repository. */
+interface Accounts { github?: Record<string, unknown>; instance?: Record<string, unknown> | null; feishu?: Record<string, unknown> | null }
 function seed(store: Store, accounts: Accounts = {}): void {
   const settings = store.settings()
-  const { feishu: _feishu, ...others } = settings.sources
+  const { feishu: _feishu, ...others } = Object.fromEntries(Object.entries(settings.sources).filter(([id]) => id !== 'github' && !id.startsWith('github:')))
   const feishu = accounts.feishu === null ? undefined : { ...settings.sources.feishu?.config, cli: BOT(), ...accounts.feishu }
-  store.saveSettings(SettingsSchema.parse({ ...settings, sources: { ...others, github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT(), ...accounts.github } }, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
+  const instance = accounts.instance === null ? {} : { [INSTANCE.source]: { enabled: true, config: { repository: INSTANCE.repository, ...accounts.instance } } }
+  store.saveSettings(SettingsSchema.parse({ ...settings, sources: { ...others, github: { enabled: true, config: { cli: AGENT(), ...accounts.github } }, ...instance, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
 }
 let restarts: ReturnType<typeof vi.fn<() => void>>
 async function restart(machine: Partial<Machine> = {}, accounts: Accounts = {}): Promise<Runtime> {
@@ -211,7 +218,7 @@ beforeEach(async () => {
   await runtime.ready
   // Source kinds are normally registered by plugins that are not loaded in unit tests.
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
-  runtime.store.saveSettings({ ...runtime.store.settings(), policy: { ...runtime.store.settings().policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } }, eval: { ...runtime.store.settings().eval, mode: 'auto' }, sources: { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT() } }, feishu: { enabled: true, config: { cli: BOT(), chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+  runtime.store.saveSettings({ ...runtime.store.settings(), policy: { ...runtime.store.settings().policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, [INSTANCE.source]: { allowed: [{ id: 'alice' }] } } }, eval: { ...runtime.store.settings().eval, mode: 'auto' }, sources: { github: { enabled: true, config: { cli: AGENT() } }, [INSTANCE.source]: { enabled: true, config: { repository: INSTANCE.repository } }, feishu: { enabled: true, config: { cli: BOT(), chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
 })
 afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await runtime?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
@@ -329,9 +336,9 @@ it('records worker reports, binds the task PR, ends the ticket on ready without 
   expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Desktop too?', text: '要不要也改桌面端？' })).toEqual({ status: 'sent' })
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42, human_action: null })
   const bound = runtime.store.tickets.get(ticket.id)!
-  expect(pullOf(bound)).toBe(42)
+  expect(pullOf(bound)).toEqual({ source: INSTANCE.source, number: 42 })
   expect(bound.attention).toBeUndefined()
-  expect(runtime.store.threads.get('github:42')?.subscriptions).toEqual([ticket.id])
+  expect(runtime.store.threads.get(ghThread(42))?.subscriptions).toEqual([ticket.id])
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'reviewed' })
   expect(runtime.store.tickets.get(ticket.id)!.ended).toBeUndefined()
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'ready' })
@@ -339,26 +346,26 @@ it('records worker reports, binds the task PR, ends the ticket on ready without 
   const mergedAt = new Date().toISOString()
   const merged = { number: 42, state: 'closed', merged: true, merged_at: mergedAt, html_url: 'https://github.com/acme/widgets/pull/42',
     user: { login: 'agent-bot' }, head: { sha: 'abc', ref: 'agent/x', repo: { full_name: 'acme/widgets' } } }
-  await observePull(runtime.context(githubKind), merged)
+  await observePull(runtime.context(githubKind), INSTANCE, merged)
   const ended = runtime.store.tickets.get(ticket.id)!
   expect(ended).toMatchObject({ ended: expect.objectContaining({ by: 'executor', outcome: 'merged' }) })
   // The ended ticket keeps its Subscription to the PR, so a later human comment there resumes it.
-  expect(runtime.store.threads.get('github:42')?.subscriptions).toEqual([ticket.id])
+  expect(runtime.store.threads.get(ghThread(42))?.subscriptions).toEqual([ticket.id])
   // Its worker's last word was its ready report, so its turn is not cancelled: it ends it itself.
   expect(agents.get(sessionId)!.cancel).not.toHaveBeenCalled()
   const notice = runtime.store.receipts.waiting().find(item => item.kind === 'notice')
-  expect(notice ?? runtime.store.replyStatus(key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged'))).toBeTruthy()
+  expect(notice ?? runtime.store.replyStatus(key('pr-terminal', ghThread(42), 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged'))).toBeTruthy()
 })
 
 it('lists each ticket with the Threads it subscribes to, as their Sources describe them', async () => {
   const { sessionId, ticket } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42 })
   const line = () => ticketList(viewsOf(runtime), 'working', 0, 20).items.find(item => item.id === ticket.id)!
-  runtime.store.threads.describe('github:42', { label: '#42 Fix the margin', facts: { number: { value: '#42' }, ci: { label: 'CI', value: { zh: '通过', en: 'passed' } } } })
+  runtime.store.threads.describe(ghThread(42), { label: '#42 Fix the margin', facts: { number: { value: '#42' }, ci: { label: 'CI', value: { zh: '通过', en: 'passed' } } } })
   expect(line()).not.toHaveProperty('prNumber')
-  expect(line().threads).toContainEqual(expect.objectContaining({ key: 'github:42', source: 'github', title: '#42 Fix the margin', facts: { number: { value: '#42' }, ci: { label: 'CI', value: { zh: '通过', en: 'passed' } } } }))
-  runtime.store.threads.describe('github:42', { facts: { ci: null } })
-  expect(line().threads.find(thread => thread.key === 'github:42')!.facts).toEqual({ number: { value: '#42' } })
+  expect(line().threads).toContainEqual(expect.objectContaining({ key: ghThread(42), source: INSTANCE.source, title: '#42 Fix the margin', facts: { number: { value: '#42' }, ci: { label: 'CI', value: { zh: '通过', en: 'passed' } } } }))
+  runtime.store.threads.describe(ghThread(42), { facts: { ci: null } })
+  expect(line().threads.find(thread => thread.key === ghThread(42))!.facts).toEqual({ number: { value: '#42' } })
 })
 
 it('shows a message that carries JSON, with or without a label, as its label and values on lines', () => {
@@ -455,15 +462,15 @@ it('acknowledges a follow-up from the worker once and rejects events outside the
 })
 
 it('treats GitHub comments through the same gate: mentions by members are explicit, others need an existing task', async () => {
-  const stranger = commentTrigger({ id: 1, body: 'looks wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-1', created_at: '2026-09-09T00:00:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
+  const stranger = commentTrigger(INSTANCE, { id: 1, body: 'looks wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-1', created_at: '2026-09-09T00:00:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
   await receive(stranger)
-  expect(runtime.store.decisions.byThread('github:7')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [expect.objectContaining({ code: 'not_a_member' })] })])
-  const mention = commentTrigger({ id: 2, body: '@agent-bot please fix', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-2', created_at: '2026-09-09T00:01:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
+  expect(runtime.store.decisions.byThread(ghThread(7))).toEqual([expect.objectContaining({ kind: 'ignore', reason: [expect.objectContaining({ code: 'not_a_member' })] })])
+  const mention = commentTrigger(INSTANCE, { id: 2, body: '@agent-bot please fix', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-2', created_at: '2026-09-09T00:01:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
   await receive(mention)
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: mention.id })
   const result = await route({ kind: 'accept', trigger_id: mention.id, title: 'Fix PR 7', worktree_name: 'fix-pr', acknowledgement: 'On it: fixing the review finding.' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
-  expect(ticket.channels).toEqual([expect.objectContaining({ source: 'github', address: expect.objectContaining({ number: '7' }) })])
+  expect(ticket.channels).toEqual([expect.objectContaining({ source: INSTANCE.source, address: expect.objectContaining({ number: '7', repository: 'acme/widgets' }) })])
   // The PR's head is a variable of the ticket's execution environment; a prepare command may fetch it.
   expect(Object.fromEntries(runtime.ticketEnvironment(ticket).map(variable => [variable.key, variable.value]))).toMatchObject({ DSH_SUPERAGENT_GITHUB_NUMBER: '7', DSH_SUPERAGENT_GITHUB_PR_HEAD: 'refs/pull/7/head', DSH_SUPERAGENT_FEISHU_CHAT: '' })
   const ci = { ...stranger, id: 'ci-1', human: false, text: 'GitHub PR #7 CI: failing', meta: { ci: true } }
@@ -477,13 +484,12 @@ it('relays an allowed sender\'s mention in a new Issue as an explicit candidate 
   const notification = { id: 'n1', updated_at: issue.created_at, reason: 'mention', repository: { full_name: 'acme/widgets' },
     subject: { url: 'https://api.github.com/repos/acme/widgets/issues/12', type: 'Issue', title: issue.title } }
   vi.spyOn(Commands.prototype, 'run').mockResolvedValue(`HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify([notification])}`)
-  vi.spyOn(Commands.prototype, 'gh').mockResolvedValue(issue)
-  vi.spyOn(Commands.prototype, 'pages').mockResolvedValue([])
-  runtime.store.set('github-since', '2026-09-08T23:59:00.000Z')
-  await pollRound(runtime.context(githubKind))
+  vi.spyOn(Commands.prototype, 'gh').mockImplementation(async (args: string[]) => (args.includes('--slurp') ? [[]] : issue) as never)
+  runtime.store.set(KV.github.since(INSTANCE.source), '2026-09-08T23:59:00.000Z')
+  await pollRound(instanceContext(), INSTANCE)
   await runtime.idle()
   const candidate = relays(runtime.masterId).at(-1)
-  expect(candidate).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: key('github-issue', '12'), thread: 'github:12' })
+  expect(candidate).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: key('github-issue', INSTANCE.source, '12'), thread: ghThread(12) })
 })
 
 it('ignores an allowed sender\'s new Issue that does not mention the agent, and an unlisted sender\'s mention, from the poll that reads them', async () => {
@@ -492,18 +498,17 @@ it('ignores an allowed sender\'s new Issue that does not mention the agent, and 
     const notification = { id: `n${number}`, updated_at: issue.created_at, reason: 'subscribed', repository: { full_name: 'acme/widgets' },
       subject: { url: `https://api.github.com/repos/acme/widgets/issues/${number}`, type: 'Issue', title: issue.title } }
     vi.spyOn(Commands.prototype, 'run').mockResolvedValue(`HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify([notification])}`)
-    vi.spyOn(Commands.prototype, 'gh').mockResolvedValue(issue)
-    vi.spyOn(Commands.prototype, 'pages').mockResolvedValue([])
-    runtime.store.set('github-since', '2026-09-08T23:59:00.000Z')
-    await pollRound(runtime.context(githubKind))
+    vi.spyOn(Commands.prototype, 'gh').mockImplementation(async (args: string[]) => (args.includes('--slurp') ? [[]] : issue) as never)
+    runtime.store.set(KV.github.since(INSTANCE.source), '2026-09-08T23:59:00.000Z')
+    await pollRound(instanceContext(), INSTANCE)
     await runtime.idle()
-  await runtime.idle()
-    return key('github-issue', String(number))
+    await runtime.idle()
+    return key('github-issue', INSTANCE.source, String(number))
   }
   const quiet = await poll(12, 'The login page fails after the update', 'alice')
-  expect(runtime.store.decisions.byThread('github:12')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [{ code: 'no_mention', triggerId: quiet }] })])
+  expect(runtime.store.decisions.byThread(ghThread(12))).toEqual([expect.objectContaining({ kind: 'ignore', reason: [{ code: 'no_mention', triggerId: quiet }] })])
   const stranger = await poll(13, '@agent-bot please fix the login', 'mallory')
-  expect(runtime.store.decisions.byThread('github:13')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [{ code: 'not_a_member', triggerId: stranger }] })])
+  expect(runtime.store.decisions.byThread(ghThread(13))).toEqual([expect.objectContaining({ kind: 'ignore', reason: [{ code: 'not_a_member', triggerId: stranger }] })])
   expect(relays(runtime.masterId).filter(item => item.kind === 'candidate')).toEqual([])
 })
 
@@ -722,7 +727,7 @@ it('links Channels and Threads for people, finds tickets by a bare PR number, an
   expect(ticketDetail(viewsOf(runtime), ticket.id)!.channels).toEqual([expect.objectContaining({ source: 'feishu', url: chatLink })])
   expect(threadDetail(viewsOf(runtime), home, undefined, 10)!.url).toBe(chatLink)
   // A pull request the Ticket opened is a Thread it follows as its own.
-  runtime.store.tickets.save({ ...runtime.store.tickets.get(ticket.id)!, follows: [{ thread: 'github:4996', own: true }] })
+  runtime.store.tickets.save({ ...runtime.store.tickets.get(ticket.id)!, follows: [{ thread: ghThread(4996), own: true }] })
   expect(search(viewsOf(runtime), '4996', new TextCache(0)).tickets).toEqual([expect.objectContaining({ id: ticket.id })])
   expect(threadList(viewsOf(runtime), 'subscribed', 0, 10).items.map(thread => thread.key)).toEqual([home])
   runtime.engine.stopTicket(ticket.id)
@@ -743,18 +748,18 @@ it('counts every step of the day\'s flow over the same arriving messages and lis
 })
 
 it('queues a requeued trigger visibly and tells the orchestrator', async () => {
-  const stranger = commentTrigger({ id: 3, body: 'looks wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/8#issuecomment-3', created_at: '2026-09-09T00:00:00Z' }, { number: 8, isPr: true }, 'conversation', 'agent-bot')
+  const stranger = commentTrigger(INSTANCE, { id: 3, body: 'looks wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/8#issuecomment-3', created_at: '2026-09-09T00:00:00Z' }, { number: 8, isPr: true }, 'conversation', 'agent-bot')
   await receive(stranger)
   runtime.store.saveSettings({ ...runtime.store.settings(), paused: true })
   expect(runtime.engine.reevaluate(stranger.id)).toBe(true)
-  expect(threadDetail(viewsOf(runtime), 'github:8', undefined, 50)!.timeline[0]!.disposition).toMatchObject({ queued: true })
+  expect(threadDetail(viewsOf(runtime), ghThread(8), undefined, 50)!.timeline[0]!.disposition).toMatchObject({ queued: true })
   await vi.waitFor(() => expect(agents.get(runtime.masterId)!.inject).toHaveBeenCalled())
 })
 
 it('asks a question where the human message that raised it was written, not in the ticket\'s original conversation', async () => {
   const { ticket, trigger, sessionId } = await acceptedTicket()
-  subscribe(ticket.id, { source: 'github', id: '42' })
-  const review = commentTrigger({ id: 5, body: 'Can you add the reason?', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/42#pullrequestreview-5', created_at: '2026-09-09T00:02:00Z' }, { number: 42, isPr: true }, 'review', 'agent-bot')
+  subscribe(ticket.id, { source: INSTANCE.source, id: '42' })
+  const review = commentTrigger(INSTANCE, { id: 5, body: 'Can you add the reason?', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/42#pullrequestreview-5', created_at: '2026-09-09T00:02:00Z' }, { number: 42, isPr: true }, 'review', 'agent-bot')
   await receive(review)
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'x', question_for_trigger_id: review.id })).rejects.toThrow('needs the question it raised')
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'x', human_action: 'Keep it?', question_for_trigger_id: 'unknown' })).rejects.toThrow('the person\'s message that raised it')
@@ -769,9 +774,9 @@ it('asks a question where the human message that raised it was written, not in t
 })
 
 it('finds triggers by #PR number, GitHub link prefix and Feishu message id', async () => {
-  const comment = commentTrigger({ id: 4, body: 'please check', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/9#issuecomment-4', created_at: '2026-09-09T00:00:00Z' }, { number: 9, isPr: true }, 'conversation', 'agent-bot')
+  const comment = commentTrigger(INSTANCE, { id: 4, body: 'please check', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/9#issuecomment-4', created_at: '2026-09-09T00:00:00Z' }, { number: 9, isPr: true }, 'conversation', 'agent-bot')
   await receive(comment)
-  expect(search(viewsOf(runtime), '#9', new TextCache(0)).threads).toEqual([expect.objectContaining({ key: 'github:9' })])
+  expect(search(viewsOf(runtime), '#9', new TextCache(0)).threads).toEqual([expect.objectContaining({ key: ghThread(9) })])
   expect(search(viewsOf(runtime), 'https://github.com/acme/widgets/pull/9', new TextCache(0)).items.map(item => item.id)).toContain(comment.id)
   const message = feishu('30', '随便说说', { mentions: [] })
   await receive(message)
@@ -858,7 +863,9 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   // git older than 2.32 ignores GIT_CONFIG_GLOBAL and reads the operator's configuration.
   answers = { ...valid, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
   await needs('deployment', 'gitTooOld', {})
-  await needs('github', 'repositoryUnset', {}, { github: { repository: '' } })
+  // No repository account at all (neither CLI nor repository) is the deployment's problem; a signed-in account that watches no repository is not.
+  answers = valid
+  await needs('github', 'repositoryUnset', {}, { github: { cli: '' }, instance: null })
   // A broken Feishu bot leaves Feishu out and says why; GitHub work goes on.
   answers = { ...valid, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
   const next = await restart()
@@ -910,14 +917,19 @@ it('checks a changed account CLI before saving it, restarts after the save, and 
   const save = (config: Record<string, unknown>, origin: SettingsOrigin = 'panel') => runtime.settings.save('source:github',
     { enabled: true, config: { ...runtime.store.settings().sources.github!.config, ...config } }, runtime.store.blockRevision('source:github'), origin)
   await expect(save({ cli: OTHER() }, 'tool')).rejects.toThrow('can only be changed in the management panel')
-  answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
-  await expect(save({ cli: OTHER() })).rejects.toMatchObject({ code: 'repositoryReadOnly', values: { account: 'agent-bot' } })
+  // The account block checks the account the CLI is signed in to; each repository's push access is checked when its instance is saved.
+  answers[`${OTHER()} api user`] = '{}'
+  await expect(save({ cli: OTHER() })).rejects.toMatchObject({ code: 'agentCliNoAccount' })
   expect(restarts).not.toHaveBeenCalled()
-  answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
+  answers[`${OTHER()} api user`] = '{"login":"agent-bot","id":7}'
   expect(await save({ cli: OTHER() })).toMatchObject({ saved: true, restarting: true })
   await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
-  // Other fields of the Source take effect without a restart.
-  expect(await save({ pollSeconds: 120 })).toMatchObject({ saved: true, restarting: false })
+  // Other fields of the Source take effect without a restart: the account's failure threshold, and a repository instance's polling.
+  expect(await save({ failuresBeforeError: 5 })).toMatchObject({ saved: true, restarting: false })
+  const instanceBlock: SettingsBlock = `source:${INSTANCE.source}`
+  const saveInstance = (config: Record<string, unknown>) => runtime.settings.save(instanceBlock,
+    { enabled: true, config: { ...runtime.store.settings().sources[INSTANCE.source]!.config, ...config } }, runtime.store.blockRevision(instanceBlock), 'panel')
+  expect(await saveInstance({ pollSeconds: 120 })).toMatchObject({ saved: true, restarting: false })
   expect(restarts).toHaveBeenCalledTimes(1)
   expect((await runtime.settings.save('executor', { ...runtime.store.settings().executor, prepare: 'true' }, runtime.store.blockRevision('executor'), 'panel')).restarting).toBe(false)
   // A save of another block during the account check is kept: the check runs first, then the save merges.
@@ -931,6 +943,19 @@ it('checks a changed account CLI before saving it, restarts after the save, and 
   expect(await feishuSave('')).toMatchObject({ restarting: true })
   answers[`${BOT()} config strict-mode`] = 'strict-mode: off (source: profile)'
   await expect(feishuSave(BOT())).rejects.toMatchObject({ code: 'feishuUserIdentity', values: { mode: 'off' } })
+})
+
+it('checks the push access of a repository before its instance is added, and restarts to listen to it', async () => {
+  const block = 'source:github:acme~other'
+  const add = () => runtime.settings.save(block, { enabled: true, config: { repository: 'acme/other' } }, runtime.store.blockRevision(block), 'panel')
+  const probe = `${AGENT()} api repos/acme/other --jq {name: .full_name, push: .permissions.push}`
+  answers[probe] = '{"name":"acme/other","push":false}\n'
+  await expect(add()).rejects.toMatchObject({ code: 'repositoryReadOnly', values: { account: 'agent-bot', repository: 'acme/other' } })
+  expect(runtime.store.settings().sources['github:acme~other']).toBeUndefined()
+  answers[probe] = '{"name":"acme/other","push":true}\n'
+  expect(await add()).toMatchObject({ saved: true, restarting: true })
+  expect(runtime.store.settings().sources['github:acme~other']).toMatchObject({ enabled: true, config: { repository: 'acme/other' } })
+  expect(runtime.store.settings().sources[INSTANCE.source]).toBeDefined()
 })
 
 it('lists Tickets that wait on a person with where to answer them, as the overview does', async () => {
@@ -972,15 +997,14 @@ it('runs setup again while the Feishu bot check failed, and restores the process
 
 it('writes worker shims and the agent environment from the configuration only, and restores the environment on stop', async () => {
   const bin = join(directory, 'worker-bin')
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-cli'])
+  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-robot'])
   expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain(`exec '${BOT()}'`)
   expect(readFileSync(join(bin, 'glab'), 'utf8')).toContain('glab is unavailable')
-  expect(readFileSync(join(bin, 'popo-cli'), 'utf8')).toContain('popo-cli is unavailable')
   runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, blockedCommands: ['personal-gh'] } })
   const next = await restart({}, { feishu: null })
   await next.ready
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'personal-gh', 'popo-cli'])
-  expect(readFileSync(join(bin, 'personal-gh'), 'utf8')).toContain('personal-gh is blocked in this installation; use gh, glab, or popo-cli')
+  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'personal-gh', 'popo-robot'])
+  expect(readFileSync(join(bin, 'personal-gh'), 'utf8')).toContain('personal-gh is blocked in this installation; use gh, glab, lark-cli, or popo-robot')
   expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain('lark-cli is unavailable: this installation has no Feishu bot.')
   expect(readFileSync(join(bin, 'gh'), 'utf8')).toContain(`exec '${AGENT()}'`)
   expect(readFileSync(workerGitConfig(directory), 'utf8')).toContain(`[credential "https://github.com"]\n\thelper = "${credentialHelper(AGENT())}"`)
@@ -1006,9 +1030,9 @@ it('rewrites the blocked-command shims when the Executor settings change them, w
   const bin = join(directory, 'worker-bin')
   const save = (blockedCommands: string[]) => runtime.settings.save('executor', { ...runtime.store.settings().executor, blockedCommands }, runtime.store.blockRevision('executor'), 'panel')
   expect(await save(['personal-gh'])).toMatchObject({ saved: true, restarting: false })
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'personal-gh', 'popo-cli'])
+  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'personal-gh', 'popo-robot'])
   await save([])
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-cli'])
+  expect(readdirSync(bin).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-robot'])
   // The commands workers need cannot be blocked.
   await expect(save(['gh'])).rejects.toThrow()
   expect(restarts).not.toHaveBeenCalled()
@@ -1189,7 +1213,7 @@ describe('the order of a Ticket\'s messages to one conversation', () => {
     runtime.outbox.send(message('result-a', 'a'))
     // Another Ticket in the same chat, and the same Ticket in an Issue, are other orders.
     runtime.outbox.send(message('ack-b', 'b', feishuChannel(CHAT, 'om_2')))
-    runtime.outbox.send(message('issue-a', 'a', githubChannel(7)))
+    runtime.outbox.send(message('issue-a', 'a', githubChannel(INSTANCE, 7)))
     await runtime.sendReplies()
     expect([runtime.outbox.status('result-a'), sent]).toEqual(['pending', ['ack-b', 'issue-a']])
     await at(5000)
@@ -1346,7 +1370,7 @@ it('records a report, the PR it binds and its relay together, or none of them', 
 })
 
 it('tells the main Session of each requeue of the same Trigger', async () => {
-  const stranger = commentTrigger({ id: 4, body: 'still wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/8#issuecomment-4', created_at: '2026-09-09T00:00:00Z' },
+  const stranger = commentTrigger(INSTANCE, { id: 4, body: 'still wrong', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/8#issuecomment-4', created_at: '2026-09-09T00:00:00Z' },
     { number: 8, isPr: true, url: 'https://github.com/acme/widgets/pull/8' }, 'conversation', 'agent-bot')
   await receive(stranger)
   const requeued = () => agents.get(runtime.masterId)!.inject.mock.calls.filter(([message]) => JSON.stringify(message).includes('trigger_requeued')).length
@@ -1430,9 +1454,9 @@ it('tells the conversation that the PR merged when work a restart recovered ends
   // The PR merged before the restart; the recovered work goes on, and nothing is said yet.
   const merged = { number: 42, state: 'closed', merged: true, merged_at: before.assignments[0]!.createdAt, html_url: 'https://github.com/acme/widgets/pull/42',
     user: { login: 'agent-bot' }, head: { sha: 'abc', ref: 'agent/x', repo: { full_name: 'acme/widgets' } } }
-  await observePull(runtime.context(githubKind), merged)
+  await observePull(runtime.context(githubKind), INSTANCE, merged)
   expect(runtime.store.tickets.get(ticket.id)).not.toHaveProperty('ended')
-  const id = key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged')
+  const id = key('pr-terminal', ghThread(42), 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged')
   expect(runtime.store.replyStatus(id)).toBeUndefined()
   // Its ready report ends the ticket with the PR, and the conversation hears of the merge once.
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Recovered and verified' })

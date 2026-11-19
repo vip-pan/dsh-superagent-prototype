@@ -40,7 +40,7 @@ export async function sendGitlab(host: Pick<SourceContext, 'commands'>, message:
 export function gitlabLink(address: Record<string, string>, links: ChannelLinks): ChannelLink {
   const iid = address.iid ?? ''
   const mr = address.kind === 'mr'
-  const project = address.project ?? links.gitlab?.defaultProject ?? ''
+  const project = address.project ?? ''
   return { url: address.url ?? (links.gitlab && project ? `https://${links.gitlab.host}/${project}/-/${mr ? 'merge_requests' : 'issues'}/${iid}` : ''),
     label: { zh: `GitLab ${mr ? '!' : '#'}${iid}`, en: `GitLab ${mr ? '!' : '#'}${iid}` } }
 }

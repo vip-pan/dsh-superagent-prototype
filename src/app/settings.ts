@@ -1,10 +1,12 @@
 /** Block-scoped settings validation, optimistic concurrency saves, processing pause control, and source policy synchronization. */
+import { spawn } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
+import type { FieldSpec } from '../sources/kind.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import { sourceKey, type SourceRegistry } from '../sources/registry.ts'
 import { resolveRoleModel } from './role-models.ts'
@@ -22,6 +24,25 @@ export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
 const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
+
+/** Checks `command` (parse only, nothing runs), the shell that runs the prepare command; resolves to the parser's complaint or `undefined` when it is valid. */
+function shellSyntaxError(command: string): Promise<string | undefined> {
+  return new Promise(resolve => {
+    const child = spawn('sh', ['-n'], { stdio: ['pipe', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk })
+    child.on('error', () => resolve(undefined)) // No sh to ask: leave the check to the run itself.
+    child.on('close', code => resolve(code === 0 ? undefined : stderr.trim().replace(/^sh: (?:-n: )?/, '') || 'syntax error'))
+    child.stdin.on('error', () => { /* The parser exited before reading it all; its exit code speaks. */ })
+    child.stdin.end(command)
+  })
+}
+
+/** A watched repository or project runs only under its Source: it cannot be on while the Source is explicitly off. */
+function requireAccount(settings: SettingsValue, id: string): void {
+  const { kind, name } = sourceKey(id)
+  if (name !== undefined && settings.sources[id]?.enabled && settings.sources[kind]?.enabled === false) throw new UserError('accountDisabled', { source: kind })
+}
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -46,7 +67,15 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
   },
   source: {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
-    merge: (settings, value, id) => ({ ...settings, sources: { ...settings.sources, [id]: value as SettingsValue['sources'][string] } }),
+    // A Source switched off takes every repository or project stored under it along: they run only under a running account.
+    merge: (settings, value, id) => {
+      const stored = value as SettingsValue['sources'][string]
+      const sources = { ...settings.sources, [id]: stored }
+      if (sourceKey(id).name === undefined && !stored.enabled) {
+        for (const [key, instance] of Object.entries(sources)) if (key.startsWith(`${id}:`) && instance.enabled) sources[key] = { ...instance, enabled: false }
+      }
+      return { ...settings, sources }
+    },
     // Only the management panel may switch source accounts.
     guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
   },
@@ -147,16 +176,20 @@ export class Settings {
    */
   async save(block: SettingsBlock, value: unknown, revision: number, origin: SettingsOrigin) {
     const { store, sources, engine, sessions } = this.host
-    const stale = () => revision !== store.blockRevision(block)
+    // An instance that is not stored yet is created whatever revision its block reached before an earlier removal; it conflicts
+    // only when someone stores it first.
+    const creating = block.startsWith('source:') && sourceKey(block.slice(7)).name !== undefined && !(block.slice(7) in store.settings().sources)
+    const stale = () => creating ? block.slice(7) in store.settings().sources : revision !== store.blockRevision(block)
     if (stale()) throw new SettingsConflict('Settings changed. Reload before saving.')
     const id = block.startsWith('source:') ? block.slice(7) : block
     const kind = block.startsWith('source:') ? 'source' : block
     if (!(kind in BLOCKS)) throw new UserError('unknownBlock', { block })
     const rules = BLOCKS[kind as keyof typeof BLOCKS]
     if (kind === 'source' && !sources.kind(sourceKey(id).kind)) throw new UserError('sourceNotInstalled', { source: id })
-    const parsed = rules.parse(value, sources, id)
     const current = store.settings()
+    const parsed = rules.parse(value, sources, id)
     const candidate = rules.merge(current, parsed, id)
+    if (kind === 'source') requireAccount(candidate, id)
     const model = block === 'eval' ? candidate.eval.model : block === 'executor' ? candidate.executor.model : null
     const previous = block === 'eval' ? current.eval.model : block === 'executor' ? current.executor.model : null
     if (model && JSON.stringify(model) !== JSON.stringify(previous)) {
@@ -164,23 +197,38 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    // A prepare command that does not parse would fail every new Ticket; a saved one that already fails does not block other edits.
+    if (block === 'executor' && candidate.executor.prepare.trim() && candidate.executor.prepare !== current.executor.prepare) {
+      const error = await shellSyntaxError(candidate.executor.prepare)
+      if (error) throw new UserError('prepareSyntax', { error })
+    }
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
     const old = store.settings()
     const settings = rules.merge(old, parsed, id)
+    if (kind === 'source') requireAccount(settings, id)
     if (JSON.stringify(SettingsSchema.parse(settings)) === JSON.stringify(old)) {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
     }
+    return this.commit(block, old, settings, origin)
+  }
+
+  /** Records settings that differ from `old` as a new revision of `block`, notifying affected tickets, and restarts when setup-read fields changed. */
+  private async commit(block: SettingsBlock, old: SettingsValue, settings: SettingsValue, origin: SettingsOrigin) {
+    const { store, engine, sessions } = this.host
     const restarting = setupChanged(old, settings) || !this.host.setup.configured()
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
     const effects = before === after ? new Map() : policyEffects(store.tickets.open(), old, SettingsSchema.parse(settings), scope)
     const notified = [...effects.keys()]
+    // Instances switched off along with their account change as well, so their blocks move to a new revision too.
+    const switched = Object.keys(settings.sources).filter(key => `source:${key}` !== block && (old.sources[key]?.enabled ?? true) !== (settings.sources[key]?.enabled ?? true))
     store.atomic(() => {
-      store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
+      store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified },
+        switched.map(key => `source:${key}` as SettingsBlock))
       if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
       if (before !== after) engine.policyChanged(before, after, effects)
     })
@@ -193,6 +241,26 @@ export class Settings {
     if (restarting) this.host.setup.restart()
     else this.host.requestPass()
     return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting, context_delivery: delivery }
+  }
+  /**
+   * Removes one stored instance of a multi-instance Source (`source:<kind>:<name>`) together with its policy part, against the
+   * instance's `revision`; the removed repository leaves the setup fields, so `dsh-superagent` restarts and stops watching it.
+   * Tickets and threads already recorded from it stay readable.
+   * @throws SettingsConflict when the instance changed since `revision`.
+   * @throws UserError (`unknownBlock`) when no such instance is stored, or (`panelOnlyAccounts`) for a non-panel origin.
+   */
+  async remove(block: SettingsBlock, revision: number, origin: SettingsOrigin) {
+    const { store, sources } = this.host
+    const id = block.startsWith('source:') ? block.slice('source:'.length) : ''
+    const { kind, name } = sourceKey(id)
+    if (!id || name === undefined || !sources.kind(kind)?.multi || !(id in store.settings().sources)) throw new UserError('unknownBlock', { block })
+    if (revision !== store.blockRevision(block)) throw new SettingsConflict('Settings changed. Reload before removing.')
+    if (origin !== 'panel') throw new UserError('panelOnlyAccounts')
+    const old = store.settings()
+    const { [id]: _instance, ...kept } = old.sources
+    const { [id]: _policy, ...parts } = old.policy.sources
+    const settings = { ...old, sources: kept, policy: { ...old.policy, sources: parts } }
+    return this.commit(block, old, settings, origin)
   }
   /**
    * Pauses or resumes processing (new evaluations, worker dispatch, and channel delivery, while Sources continue recording

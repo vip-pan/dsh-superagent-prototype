@@ -18,7 +18,7 @@ import { KV } from '../src/kv.ts'
 import { feishuLink } from '../src/sources/feishu-channel.ts'
 import { feishuChannel, feishuTriggerId } from '../src/sources/feishu-trigger.ts'
 import { githubLink } from '../src/sources/github-channel.ts'
-import { githubChannel } from '../src/sources/github-trigger.ts'
+import { githubChannel, githubInstanceId } from '../src/sources/github-trigger.ts'
 import { followupOwners, type ChannelRef } from '../src/core/index.ts'
 
 let directory: string
@@ -28,7 +28,9 @@ beforeEach(() => {
   store = new Store(join(directory, 'orchestrator.sqlite'))
 })
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
-const links = (channel: ChannelRef) => (channel.source === 'feishu' ? feishuLink : githubLink)(channel.address, {})
+const links = (channel: ChannelRef) => channel.source === 'feishu' ? feishuLink(channel.address, {}) : githubLink(channel.address)
+/** The GitHub repository instance whose Threads these tests name. */
+const instance = { source: githubInstanceId('acme/widgets'), repository: 'acme/widgets' }
 const drop = (id: string, channel: ChannelRef, ticketId?: string) => {
   const message = { id, channel, text: id, kind: 'reply' as const, ...ticketId ? { ticketId } : {} }
   store.receipts.add(message)
@@ -39,14 +41,14 @@ it('names the Thread of each dropped message: the one of the Trigger its Channel
   // A Feishu Channel names its chat; the message it answers belongs to the Thread of the topic's root message.
   store.triggers.save({ id: feishuTriggerId('om_reply'), source: 'feishu', threads: [{ source: 'feishu', id: 'oc_1:om_root' }],
     actor: { source: 'feishu', id: 'ou_a' }, human: true, at: new Date().toISOString(), text: 'please', meta: {} })
-  store.threads.save({ key: 'github:42', ref: { source: 'github', id: '42' }, createdAt: '', subscriptions: [], correlated: [], pending: [],
-    meta: {} })
+  store.threads.save({ key: `${instance.source}:42`, ref: { source: instance.source, id: '42' }, createdAt: '', subscriptions: [], correlated: [],
+    pending: [], meta: {} })
   drop('a', feishuChannel('oc_1', 'om_reply'))
-  drop('b', githubChannel(42))
+  drop('b', githubChannel(instance, 42))
   // A message whose Trigger and Thread the store no longer has links nowhere.
   drop('c', feishuChannel('oc_2', 'om_gone'))
   expect(Object.fromEntries(droppedReplies({ store, links }).map(item => [item.id, item.thread])))
-    .toEqual({ a: 'feishu:oc_1:om_root', b: 'github:42', c: undefined })
+    .toEqual({ a: 'feishu:oc_1:om_root', b: `${instance.source}:42`, c: undefined })
 })
 
 function views() {

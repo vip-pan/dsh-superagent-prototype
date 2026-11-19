@@ -7,6 +7,7 @@ import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
+import { githubInstanceId, githubThread } from '../src/sources/github-trigger.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host
@@ -33,10 +34,12 @@ it('reads the lists, a ticket, a decision, the settings, the prompts and the mod
     trigger_id: trigger.id, assignments: { items: [expect.objectContaining({ state: 'running' })] }, assignment: `ticket/${ticket.id}/assignment` })
   // The settings name each block's revision and hold the small blocks; a block reads whole by the name a save takes.
   const settings = await read('settings')
-  expect(settings).toMatchObject({ eval: { value: { mode: 'auto' } }, policy: { revision: expect.any(Number), allowed: { feishu: 1, github: 1 }, read: 'settings/policy' },
-    pause: { value: { paused: false } }, sources: expect.arrayContaining([expect.objectContaining({ id: 'github', read: 'settings/source:github' })]) })
+  expect(settings).toMatchObject({ eval: { value: { mode: 'auto' } }, policy: { revision: expect.any(Number), allowed: { feishu: 1, 'github:acme~widgets': 1 }, read: 'settings/policy' },
+    // A multi-instance kind lists its account entry and each stored instance, which read by their own block names.
+    pause: { value: { paused: false } }, sources: expect.arrayContaining([expect.objectContaining({ id: 'github', read: 'settings/source:github' }),
+      expect.objectContaining({ id: 'github:acme~widgets', kind: 'github', read: 'settings/source:github:acme~widgets' })]) })
   expect(JSON.stringify(settings)).not.toContain('ou_alice')
-  for (const block of ['policy', 'eval', 'executor', 'pause', 'source:github']) {
+  for (const block of ['policy', 'eval', 'executor', 'pause', 'source:github', 'source:github:acme~widgets']) {
     const page = await read(`settings/${block}`) as { text: string }
     expect(JSON.parse(page.text)).toEqual({ block, revision: h.runtime.store.blockRevision(block as 'policy'), value: h.runtime.settings.block(block).value })
   }
@@ -393,7 +396,8 @@ it('shows a candidate with its thread\'s tickets open first, the tickets it reac
   expect(followup).toMatchObject({ tickets_total: 2, delivered_to: [a.id], thread: `feishu:${CHAT}:om_1` })
   expect(String(followup.next_action).length).toBeLessThanOrEqual(100)
   // A message elsewhere that names a pull request reads the tickets that follow it.
-  const thread = { key: 'github:123', ref: { source: 'github', id: '123' }, createdAt: '', subscriptions: [a.id], correlated: [], pending: [], meta: {} }
+  const instance = githubInstanceId('acme/widgets')
+  const thread = { key: githubThread(instance, 123), ref: { source: instance, id: '123' }, createdAt: '', subscriptions: [a.id], correlated: [], pending: [], meta: {} }
   h.runtime.store.threads.save(thread)
   h.runtime.receive(feishu('4', '@bot 看看 #123 的进展')); await h.runtime.idle()
   expect(relaysOf('candidate').at(-1)).toMatchObject({ related_tickets: [], tickets_total: 0, referenced_tickets: [{ ticket_id: a.id }] })

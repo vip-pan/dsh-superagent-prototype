@@ -1,5 +1,5 @@
 /**
- * Process environment and CLI shims that bind git, gh, glab, lark-cli, and popo-cli to the deployment's accounts and block disallowed commands.
+ * Process environment and CLI shims that bind git, gh, glab, lark-cli, and popo-robot to the deployment's accounts and block disallowed commands.
  * Variables read by workers avoid `KEY|PASSWORD|SECRET|TOKEN` in their names because DSH strips credential-shaped variables from child environments.
  * Provides default-path guardrails rather than an OS-level security boundary, as workers run under the operator's OS user.
  */
@@ -15,7 +15,9 @@ const MARKER = '# Written by dsh-superagent on every start; edits are lost.'
 /** Markers of files written under the project's earlier names (`dsh-tag`, `dsh-go`, `dsh-freelancer`), which `dsh-superagent` owns and replaces too. */
 const LEGACY_MARKERS = ['dsh-tag', 'dsh-go', 'dsh-freelancer'].map(name => `# Written by ${name} on every start; edits are lost.`)
 /** Commands workers need, which `blockedCommands` cannot block: the shims and git. */
-export const WORKER_COMMANDS: readonly string[] = ['gh', 'glab', 'git', 'lark-cli', 'popo-cli']
+export const WORKER_COMMANDS: readonly string[] = ['gh', 'glab', 'git', 'lark-cli', 'popo-robot']
+/** The `popo-robot` commands a worker never runs: group administration, scope and card setup, robot onboarding, credentials and raw API calls. */
+export const POPO_WORKER_DENY = 'team.drop,team.manage,team.create,scope,card.callback,instruction,onboard,auth.login,auth.logout,auth.token,api'
 export const workerBin = (stateDir: string): string => join(stateDir, 'worker-bin')
 export const workerGitConfig = (stateDir: string): string => join(stateDir, 'worker-gitconfig')
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
@@ -76,8 +78,8 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
  * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
  * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
  */
-export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'gitlab' | 'feishu' | 'popo'>, blockedCommands: readonly string[]): Promise<void> {
-  const { stateDir, repository, github, gitlab, feishu, popo } = deployment
+export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'github' | 'gitlab' | 'feishu' | 'popo'>, blockedCommands: readonly string[]): Promise<void> {
+  const { stateDir, github, gitlab, feishu, popo } = deployment
   const dir = workerBin(stateDir)
   await mkdir(dir, { recursive: true })
   const before = await readdir(dir)
@@ -101,9 +103,11 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   await shim('gh', github ? run(github.cli) : fail('gh is unavailable: this installation has no GitHub repository; work through glab instead.'))
   await shim('glab', gitlab ? run(gitlab.cli, { GITLAB_HOST: gitlab.host }) : fail('glab is unavailable: this installation has no GitLab project.'))
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
-  await shim('popo-cli', popo ? run(popo.cli, { NO_COLOR: '1', FORCE_COLOR: '0' }) : fail('popo-cli is unavailable: this installation has no POPO account.'))
+  // A worker may reach only the POPO session its ticket came from (none when it came from elsewhere), and none of the administrative commands.
+  await shim('popo-robot', popo ? `${withoutShims}\nexport POPO_ROBOT_DENY=${shellQuote(POPO_WORKER_DENY)}\nexport POPO_ROBOT_ALLOW_RECEIVERS="\${DSH_SUPERAGENT_POPO_CHAT:-none}"\nexec ${shellQuote(popo.cli)} "$@"`
+    : fail('popo-robot is unavailable: this installation has no POPO robot.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
-    await shim(name, fail(`${name} is blocked in this installation; use gh, glab, or popo-cli, which act as the deployment's accounts.`))
+    await shim(name, fail(`${name} is blocked in this installation; use gh, glab, lark-cli, or popo-robot, which act as the deployment's accounts.`))
   }
   for (const name of before) if (!kept.has(name)) await unlink(join(dir, name))
   await own(workerGitConfig(stateDir), [

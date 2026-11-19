@@ -4,7 +4,12 @@ import { act } from 'react'
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field } from './fixtures/panel.tsx'
+import { githubInstanceId } from '../src/sources/github-trigger.ts'
 import { server } from './fixtures/panel-server.ts'
+
+// The GitHub Source is multi-instance: each watched repository is a Source of its own, with its own Policy part and settings card.
+const WIDGETS = githubInstanceId('acme/widgets')
+const WIDGETS_TAB = 'GitHub · widgets'
 
 usePanel()
 it('opens the Decisions under Policy from the flow line with their reasons, Decisions that start work first, filterable by kind',
@@ -34,7 +39,8 @@ it('keeps a Policy draft across remounts, and merges another save into it sender
   await mount()
   await click(zh['tab.eval'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
-  expect(all('.dt-subtab').map(tab => tab.textContent)).toEqual(['飞书', 'GitHub'])
+  // The Policy lists the Sources that have a part: Feishu, and each watched repository, not the GitHub account.
+  expect(all('.dt-subtab').map(tab => tab.textContent)).toEqual(['飞书', WIDGETS_TAB])
   await addUser()
   expect(text()).toContain(zh.draftKept)
   await remount()
@@ -65,7 +71,7 @@ it('keeps the Policy to its rules and each Source\'s part, in that Source\'s own
   for (const gone of ['自动合并', '行数阈值', '成员', '计入策略版本']) expect(text()).not.toContain(gone)
   expect(all('.dt-lv').map(item => item.textContent)[0]).toBe('策略版本 abcdef12')
   expect(text()).toContain('名单内的人 @ 机器人或私聊机器人，总是明确的请求')
-  await click(find(zh['source.github'], '.dt-subtab'))
+  await click(find(WIDGETS_TAB, '.dt-subtab'))
   expect(text()).toContain('能发起工作的 GitHub 账号')
   expect(text()).toContain('名单里的账号在 Issue 或评论里 @ 智能体的账号。')
   // A saved account shows as its id; only a row being added is a field.
@@ -115,6 +121,48 @@ it('adds, copies, renames, disables and deletes rules in Policy without touching
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/policy'])
 })
 
+it('refreshes model choices on every click and filters the styled options', async () => {
+  server.models = { default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
+    groups: [
+      { id: 'deepseek-account', name: 'DeepSeek Account', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }] },
+      { id: 'codemaker', name: 'CodeMaker', models: [{ id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro' }] },
+    ] }
+  await mount()
+  await click(tab(zh['tab.settings']))
+  await click(find(zh['term.eval'], '.dt-settings-link'))
+  const requests = () => server.requests.filter(request => request.path === 'models').length
+  const names = () => all('.dt-model-option-name').map(option => option.textContent)
+  const open = async (input: HTMLInputElement) => {
+    const before = requests()
+    await click(input)
+    expect(requests()).toBe(before + 1)
+  }
+  const provider = field<HTMLInputElement>(zh.modelProvider)
+  await open(provider)
+  expect(names()).toEqual(['DeepSeek Account', 'CodeMaker'])
+  server.models = { ...server.models!, groups: [...server.models!.groups,
+    { id: 'zai-coding-cn', name: 'ZAI Coding CN', models: [
+      { id: 'glm-5.3', name: 'GLM-5.3' }, { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash' },
+    ] }] }
+  await open(provider)
+  expect(names()).toEqual(['DeepSeek Account', 'CodeMaker', 'ZAI Coding CN'])
+  await click(all('[role="option"]').find(option => option.querySelector('.dt-model-option-name')?.textContent === 'ZAI Coding CN')!)
+  expect(provider.value).toBe('zai-coding-cn')
+  const model = field<HTMLInputElement>(zh.modelName)
+  await open(model)
+  expect(names()).toEqual(['GLM-5.3', 'GLM-5.3 Flash'])
+  await type(model, 'flash')
+  expect(names()).toEqual(['GLM-5.3 Flash'])
+  await click(all('[role="option"]')[0]!)
+  expect(model.value).toBe('glm-5.3-flash')
+  await open(model)
+  expect(names()).toEqual(['GLM-5.3', 'GLM-5.3 Flash'])
+  await type(model, 'custom-model')
+  expect(names()).toEqual([])
+  expect(model.value).toBe('custom-model')
+  expect(text()).toContain(zh.modelOptionsEmpty)
+})
+
 it('shows the current Policy version once, explains what makes it up, and opens a Mandate\'s version in the Policy history', async () => {
   await mount()
   await click(zh['tab.eval'])
@@ -161,7 +209,8 @@ it('lists each Source\'s bots next to its people and saves them, and sets the Gi
   await mount()
   await click(tab(zh['tab.settings']))
   // The GitHub Source receives only what is addressed to the agent until a switch opens a scope of the repository.
-  const github = all('.dt-card').find(card => card.querySelector('.dt-card-title')?.textContent === 'GitHub')!
+  // The switches are the watched repository's, on its own card under the GitHub account's.
+  const github = all('.dt-card').find(card => card.querySelector('.dt-card-title')?.textContent === 'acme/widgets')!
   expect([...github.querySelectorAll('.dt-switch-row')].map(row => row.textContent)).toEqual(['接收仓库里的新 Issue', '接收仓库里的新 PR',
     '接收仓库里的评论', '接收默认分支的 CI'])
   expect([...github.querySelectorAll('[role="switch"]')].slice(1).map(item => item.getAttribute('aria-checked'))).toEqual(['false', 'false',
@@ -177,7 +226,7 @@ it('lists each Source\'s bots next to its people and saves them, and sets the Gi
   const bot = await add('消息可以成为候选的机器人')
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="App ID 或 open_id"]')!, 'cli_reviewer')
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="名字"]')!, '评审机器人')
-  await click(find(zh['source.github'], '.dt-subtab'))
+  await click(find(WIDGETS_TAB, '.dt-subtab'))
   expect(lists()).toEqual(['能发起工作的 GitHub 账号', '评论可以成为候选的机器人'])
   await type((await add('评论可以成为候选的机器人')).querySelector<HTMLInputElement>('input[aria-label="账号"]')!, 'dependabot[bot]')
   // Until the GitHub Source receives the repository's Issues, pull requests, comments or CI, only messages that mention the agent arrive.
@@ -187,24 +236,25 @@ it('lists each Source\'s bots next to its people and saves them, and sets the Gi
   expect(field<HTMLSelectElement>('新 Issue · 名单外 · 点名智能体').value).toBe('ignore')
   await click(zh.save)
   expect(server.settings.policy.sources.feishu!.bots).toEqual([{ id: 'cli_reviewer', name: '评审机器人' }])
-  expect(server.settings.policy.sources.github!.bots).toEqual([{ id: 'dependabot[bot]' }])
+  expect(server.settings.policy.sources[WIDGETS]!.bots).toEqual([{ id: 'dependabot[bot]' }])
+  expect(server.settings.policy.sources.github).toBeUndefined()
 })
 
 it('shows the GitHub Source\'s switches for what it receives across the repository, and the admission rows they open, in English', async () => {
-  server.settings.sources.github = { ...server.settings.sources.github!, config: { ...server.settings.sources.github!.config,
+  server.settings.sources[WIDGETS] = { ...server.settings.sources[WIDGETS]!, config: { ...server.settings.sources[WIDGETS]!.config,
     observeIssues: true, observeCi: true } }
   await mount(en)
   await click(tab(en['tab.settings']))
-  const github = all('.dt-card').find(card => card.querySelector('.dt-card-title')?.textContent === 'GitHub')!
+  const github = all('.dt-card').find(card => card.querySelector('.dt-card-title')?.textContent === 'acme/widgets')!
   expect([...github.querySelectorAll('.dt-switch-row')].map(row => [row.textContent, row.querySelector('[role="switch"]')
     ?.getAttribute('aria-checked')])).toEqual([['Receive new Issues in the repository', 'true'],
     ['Receive new pull requests in the repository', 'false'], ['Receive comments in the repository', 'false'],
     ['Receive the default branch\'s CI', 'true']])
   await click(find('Receive comments in the repository', '[role="switch"]'))
   await act(async () => { github.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
-  expect(server.settings.sources.github!.config).toMatchObject({ observeIssues: true, observeComments: true, observeCi: true })
+  expect(server.settings.sources[WIDGETS]!.config).toMatchObject({ observeIssues: true, observeComments: true, observeCi: true })
   await click(find(en['term.eval'], '.dt-settings-link'))
-  await click(find(en['source.github'], '.dt-subtab'))
+  await click(find(WIDGETS_TAB, '.dt-subtab'))
   const rows = all('.dt-admission tbody tr').map(row => [row.querySelector('.dt-admission-scope')!.firstChild?.textContent,
     row.querySelectorAll('select').length])
   expect(rows).toEqual([['New Issues', 3], ['New pull requests', 1], ['Comments', 3], ['Default branch CI', 1]])

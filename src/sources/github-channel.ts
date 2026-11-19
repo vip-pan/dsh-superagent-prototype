@@ -4,7 +4,7 @@ import type { OutboundMessage } from '../core/index.ts'
 import { CliError } from '../infra/commands.ts'
 import { sameName } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
-import type { ChannelLink, ChannelLinks } from './kind.ts'
+import type { ChannelLink } from './kind.ts'
 import { githubAddress, githubPage } from './github-trigger.ts'
 
 const CommentSchema = z.looseObject({
@@ -16,8 +16,10 @@ const gone = (error: unknown): boolean => error instanceof CliError
 const missing = (error: unknown): boolean => error instanceof CliError && (error.code === 404 || error.code === 410)
 /** Posts a comment or review-thread reply with an embedded HTML marker so retries do not create duplicate comments. */
 export async function sendGithub(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
-  const { commands } = host
-  const { repository, github } = commands.deployment
+  const { github } = host.commands.deployment
+  const repository = message.channel.address.repository
+  if (!repository) throw new Error('Missing GitHub repository on the reply address')
+  const { api, pages } = host.commands.githubRepository(repository)
   const number = Number(message.channel.address.number)
   if (!number) throw new Error('Missing GitHub reply target')
   try {
@@ -26,7 +28,7 @@ export async function sendGithub(host: Pick<SourceContext, 'commands'>, message:
     let rootId: number | undefined
     if (address?.pr && address.discussion && address.number === number) {
       // Fall back to a top-level PR comment if the target inline review comment was deleted.
-      const source = await commands.api(CommentSchema, `pulls/comments/${address.discussion}`)
+      const source = await api(CommentSchema, `pulls/comments/${address.discussion}`)
         .catch((error: unknown) => { if (missing(error)) return undefined; throw error })
       rootId = source ? source.in_reply_to_id ?? source.id : undefined
     }
@@ -34,19 +36,20 @@ export async function sendGithub(host: Pick<SourceContext, 'commands'>, message:
     const marker = `<!-- dsh-superagent:${message.id} -->`
     const mine = (comment: z.infer<typeof CommentSchema>) => sameName(comment.user?.login ?? '', github?.login ?? '')
       && (rootId === undefined || comment.in_reply_to_id === rootId) && (comment.body ?? '').includes(marker)
-    if ((await commands.pages(CommentSchema, path)).some(mine)) return 'sent'
+    if ((await pages(CommentSchema, path)).some(mine)) return 'sent'
     const target = rootId === undefined ? path : `${path}/${rootId}/replies`
-    await commands.api(z.unknown(), target, '--method', 'POST', '-f', `body=${message.text}\n\n${marker}`)
+    await api(z.unknown(), target, '--method', 'POST', '-f', `body=${message.text}\n\n${marker}`)
     return 'sent'
   } catch (error) {
     if (gone(error)) return 'gone'
     throw error
   }
 }
-export function githubLink(address: Record<string, string>, links: ChannelLinks): ChannelLink {
+export function githubLink(address: Record<string, string>): ChannelLink {
   const number = address.number ?? ''
-  const review = !!links.repository && !!githubAddress(address.url ?? '', links.repository)?.discussion
-  return { url: address.url ?? (links.repository ? githubPage(links.repository, Number(number)) : ''),
+  const { repository } = address
+  const review = !!repository && !!githubAddress(address.url ?? '', repository)?.discussion
+  return { url: address.url ?? (repository ? githubPage(repository, Number(number)) : ''),
     label: review ? { zh: `GitHub #${number} 的 review 讨论`, en: `Review discussion on GitHub #${number}` }
       : { zh: `GitHub #${number}`, en: `GitHub #${number}` } }
 }

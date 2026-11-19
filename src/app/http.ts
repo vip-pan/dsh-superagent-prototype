@@ -35,7 +35,7 @@ export interface HttpHost {
   readonly sources: SourceRegistry
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
-  readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
+  readonly settings: Pick<Settings, 'view' | 'save' | 'remove' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
@@ -101,8 +101,8 @@ function setupView(runtime: HttpHost) {
   return {
     machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
     gitlabProblem: runtime.gitlabProblem ?? null, popoProblem: runtime.popoProblem ?? null,
-    accounts: resolved ? { repository: resolved.repository, agent: resolved.github?.login ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null,
-      gitlab: resolved.gitlab ? { host: resolved.gitlab.host, project: resolved.gitlab.defaultProject, account: resolved.gitlab.login } : null,
+    accounts: resolved ? { agent: resolved.github?.login ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null,
+      gitlab: resolved.gitlab ? { host: resolved.gitlab.host, account: resolved.gitlab.login } : null,
       popo: resolved.popo ? { account: resolved.popo.uid } : null } : null,
   }
 }
@@ -210,6 +210,11 @@ function routes(runtime: HttpHost): Routes {
       if (!known) throw new RouteError(404, 'Source not found')
       const request = SaveRequest.parse(await body())
       return runtime.settings.save(block, request.value, request.revision, 'panel')
+    },
+    'DELETE settings/:block': async ({ params, body }) => {
+      const block = SourceBlock.parse(params.block)
+      const request = z.object({ revision: z.number().int().nonnegative() }).parse(await body())
+      return runtime.settings.remove(block, request.revision, 'panel')
     },
     'GET policy/history': () => policyHistory(store, runtime.sources, policyVersion(store.settings())),
     'POST policy-sync/:id': async ({ params }) => ({ policy: await runtime.settings.sync(params.id) }),

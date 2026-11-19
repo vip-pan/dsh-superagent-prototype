@@ -5,6 +5,7 @@ import { migrateSettings } from '../src/app/migration.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
+import { githubInstanceId } from '../src/sources/github-trigger.ts'
 import type { Thread, Ticket, Trigger } from '../src/core/index.ts'
 
 const MEMBER = 'ou_alice'
@@ -271,7 +272,9 @@ it('renames the variables a stored prepare command reads from earlier project na
 
 it('reads a stored GitHub Source configuration that names a merge account without it', () => {
   const settings = SettingsSchema.parse(migrateSettings({ sources: { github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh-agent', mergeCli: 'gh-merge-account', pollSeconds: 120 } } } }))
-  expect(settings.sources.github!.config).toEqual({ repository: 'acme/widgets', cli: 'gh-agent', pollSeconds: 120 })
+  // The merge account is dropped; the repository and its polling interval move to the repository's instance, and the account keeps the CLI.
+  expect(settings.sources.github!.config).toEqual({ cli: 'gh-agent' })
+  expect(settings.sources['github:acme~widgets']).toEqual({ enabled: true, config: { repository: 'acme/widgets', pollSeconds: 120 } })
 })
 
 describe('assessment outcomes', () => {
@@ -408,23 +411,25 @@ describe('policy effects', () => {
   })
 })
 describe('bots and events without a sender', () => {
+  // A GitHub Trigger comes from a repository's instance: the instance holds what it observes, and its policy part holds the lists.
+  const REPOSITORY = 'acme/widgets', INSTANCE = githubInstanceId(REPOSITORY)
   const observing = (config: Record<string, unknown>, part: Record<string, unknown> = {},
     mode: 'auto' | 'off' = 'auto') => SettingsSchema.parse({
-    policy: { sources: { github: { allowed: [{ id: 'Alice' }], bots: [{ id: 'dependabot[bot]' }], ...part } } }, eval: { mode },
-    sources: { github: { enabled: true, config } } })
-  const comment: Trigger = { id: 'b', source: 'github', threads: [{ source: 'github', id: '1' }],
-    actor: { source: 'github', id: 'dependabot[bot]' }, human: false, at: '', text: 'Bump lodash',
-    meta: { number: 1, isPr: true, kind: 'conversation' } }
-  const ci = (meta: Record<string, unknown>): Trigger => ({ id: 'ci', source: 'github', threads: [{ source: 'github', id: 'ci:main' }],
-    actor: { source: 'github', id: '' }, human: false, at: '', text: 'CI failed 1/9 on main', meta: { ci: true, ...meta } })
+    policy: { sources: { [INSTANCE]: { allowed: [{ id: 'Alice' }], bots: [{ id: 'dependabot[bot]' }], ...part } } }, eval: { mode },
+    sources: { [INSTANCE]: { enabled: true, config: { repository: REPOSITORY, ...config } } } })
+  const comment: Trigger = { id: 'b', source: INSTANCE, threads: [{ source: INSTANCE, id: '1' }],
+    actor: { source: INSTANCE, id: 'dependabot[bot]' }, human: false, at: '', text: 'Bump lodash',
+    meta: { number: 1, isPr: true, kind: 'conversation', repository: REPOSITORY } }
+  const ci = (meta: Record<string, unknown>): Trigger => ({ id: 'ci', source: INSTANCE, threads: [{ source: INSTANCE, id: 'ci:main' }],
+    actor: { source: INSTANCE, id: '' }, human: false, at: '', text: 'CI failed 1/9 on main', meta: { ci: true, repository: REPOSITORY, ...meta } })
   it('admits a bot on its Source\'s list as an inferred candidate where the Source observes its scope, and no other bot', () => {
     const { policy } = setup(observing({ observeComments: true }))
     expect(policy.gate(comment, thread(), [])).toMatchObject({ admissible: true, strength: 'inferred',
-      basis: { via: 'bot', source: 'github', sender: 'dependabot[bot]', row: 'comments', observation: { mode: 'auto' } } })
+      basis: { via: 'bot', source: INSTANCE, sender: 'dependabot[bot]', row: 'comments', observation: { mode: 'auto' } } })
     // A bot that addresses the agent still makes no explicit request; on a Thread with tickets it is no follow-up either.
     expect(policy.gate({ ...comment, addressed: 'mention' }, thread(['ticket']), [ticket])).toMatchObject({ strength: 'inferred',
       basis: { via: 'bot', addressed: 'mention' } })
-    expect(policy.gate({ ...comment, actor: { source: 'github', id: 'renovate[bot]' } }, thread(), [])).toEqual({ admissible: false,
+    expect(policy.gate({ ...comment, actor: { source: INSTANCE, id: 'renovate[bot]' } }, thread(), [])).toEqual({ admissible: false,
       reason: 'not_human' })
     expect(setup(observing({})).policy.gate(comment, thread(), [])).toEqual({ admissible: false, reason: 'not_human' })
     expect(setup(observing({ observeComments: true }, {}, 'off')).policy.gate(comment, thread(), [])).toEqual({ admissible: false,
@@ -433,7 +438,7 @@ describe('bots and events without a sender', () => {
   it('keeps a bot candidate\'s Mandate while the bot stays on its list and candidates may become work', () => {
     const settings = observing({ observeComments: true })
     const mandate = { strength: 'inferred' as const, policyVersion: '', actor: comment.actor, scope: '',
-      basis: { via: 'bot' as const, source: 'github', scope: comment.meta, row: 'comments', sender: 'dependabot[bot]',
+      basis: { via: 'bot' as const, source: INSTANCE, scope: comment.meta, row: 'comments', sender: 'dependabot[bot]',
         observation: { mode: 'auto' as const } } }
     expect(setup(settings).policy.revalidate(mandate)).toBe(true)
     expect(setup(observing({ observeComments: true }, { bots: [] })).policy.revalidate(mandate)).toBe(false)
@@ -463,14 +468,14 @@ describe('bots and events without a sender', () => {
   })
   it('says on the GitHub bot list when a listed bot\'s comment is received: when it mentions the agent, or comments are observed', () => {
     const field = githubKind.policy!.fields.find(item => item.key === 'bots')!
-    const comments = githubKind.fields.find(item => item.key === 'observeComments')!.label
+    const comments = githubKind.multi!.fields!.find(item => item.key === 'observeComments')!.label
     expect(field.hint!.en).toContain('mentions the agent')
     expect(field.hint!.en).toContain(comments.en)
     expect(field.hint!.zh).toContain(comments.zh)
   })
   it('names a GitHub Trigger\'s receiving scope, which the Source observes where its switch is on', () => {
     const { sources } = setup(observing({ observeIssues: true }))
-    const github = (meta: Record<string, unknown>) => ({ source: 'github', meta })
+    const github = (meta: Record<string, unknown>) => ({ source: INSTANCE, meta })
     expect(sources.scope(github({ kind: 'issue', number: 3 }))).toEqual({ listened: true, observed: true, row: 'issues' })
     expect(sources.scope(github({ kind: 'pull', number: 4, isPr: true }))).toEqual({ listened: true, observed: false, row: 'pulls' })
     expect(sources.scope(github({ kind: 'inline', number: 4 }))).toEqual({ listened: true, observed: false, row: 'comments' })

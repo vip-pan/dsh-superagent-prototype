@@ -68,7 +68,7 @@ export const builtInParts = (): Readonly<Record<PartKey, BuiltInPart>> => parts 
   'skill/feishu': { roles: BOTH, text: `${sourceSkills.feishu}\n\n## CLI usage\n${cliNotes}` },
   'skill/github': { roles: BOTH, text: `${sourceSkills.github}\n\n## CLI usage\n${cliNotes}` },
   'skill/gitlab': { roles: BOTH, text: `${sourceSkills.gitlab}\n\n## CLI usage\n${cliNotes}` },
-  'skill/popo': { roles: BOTH, text: `${sourceSkills.popo}\n\n## CLI usage\n${cliNotes}` },
+  'skill/popo': { roles: BOTH, text: sourceSkills.popo },
 }
 /** The key of a built-in text, which an override's `base` records. */
 export const builtInBase = (text: string): string => key('prompt-built-in', text)

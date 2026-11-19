@@ -34,7 +34,9 @@ import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
+import { githubRepositoryOf } from '../sources/github-trigger.ts'
 import { mrEndNotices } from '../sources/gitlab-pull.ts'
+import { gitlabRepositoryOf } from '../sources/gitlab-trigger.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
@@ -152,7 +154,7 @@ export class Runtime extends Service implements SourceHost {
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             const { deployment } = setup
-            for (const message of [...deployment.github ? pullEndNotices(ended, request, deployment.repository) : [],
+            for (const message of [...deployment.github ? pullEndNotices(ended, request) : [],
               ...(deployment.gitlab ? mrEndNotices(ended, request, deployment.gitlab.host) : [])]) outbox.send(message)
           }
         } })
@@ -168,6 +170,7 @@ export class Runtime extends Service implements SourceHost {
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return setup.deployment.github ? runtime.context({ kind: 'github', health: ['github'] }) : undefined },
         get gitlab() { return setup.deployment.gitlab ? runtime.context({ kind: 'gitlab', health: ['gitlab'] }) : undefined },
+        defaultRepository: kind => { const id = sources.instanceIdFor(undefined, kind); return id ? (kind === 'github' ? githubRepositoryOf(id) : gitlabRepositoryOf(id)) : undefined },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -193,7 +196,7 @@ export class Runtime extends Service implements SourceHost {
   get popoProblem(): SetupProblem | undefined { return this.setup.popoProblem }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.gitlab ? { gitlab: resolved.gitlab } : {}),
+    const links = resolved ? { ...(resolved.gitlab ? { gitlab: resolved.gitlab } : {}),
       ...(resolved.feishu ? { feishu: resolved.feishu } : {}), ...(resolved.popo ? { popo: resolved.popo } : {}) } : {}
     return channel => this.sources.link(channel, links)
   }

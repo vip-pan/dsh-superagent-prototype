@@ -1,7 +1,7 @@
 /** Read-only GitHub repository, conversation, and CI check inspection for assessments and workers. */
 import { z } from 'zod'
 import type { ThreadFact } from '../core/index.ts'
-import { validItems, type Commands, type Tally } from '../infra/commands.ts'
+import { validItems, type Commands, type GithubCalls, type Tally } from '../infra/commands.ts'
 import { CommentSchema, IssueSchema, isHumanLogin, reviewPlace, type GithubComment } from './github-trigger.ts'
 import type { ContextMessage, ThreadContext } from './kind.ts'
 
@@ -45,23 +45,23 @@ export function ciFact(counts: { failed: number; running: number }): ThreadFact 
 }
 
 /** Reads a non-hidden file or directory listing from the repository's default branch via the GitHub API; hidden entries and `node_modules` are rejected. */
-export async function readRepositoryPath(commands: Commands, path: string, kind: 'file' | 'directory'): Promise<string> {
+export async function readRepositoryPath(calls: GithubCalls, path: string, kind: 'file' | 'directory'): Promise<string> {
   const parts = path.split('/').filter(part => part && part !== '.')
   if (parts.some(part => part === '..' || part.startsWith('.') || part === 'node_modules')) throw new Error('Only non-hidden repository source paths are available')
   const resource = `contents/${parts.map(encodeURIComponent).join('/')}`
-  if (kind === 'file') return commands.api(resource, '-H', 'Accept: application/vnd.github.raw')
+  if (kind === 'file') return calls.api(resource, '-H', 'Accept: application/vnd.github.raw')
   // GitHub returns an entry array for a directory and a single object for a file.
-  const entries = await commands.api(z.union([z.array(z.looseObject({ name: z.string() })), z.looseObject({})]), resource)
+  const entries = await calls.api(z.union([z.array(z.looseObject({ name: z.string() })), z.looseObject({})]), resource)
   if (!Array.isArray(entries)) throw new Error(`${path} is not a directory`)
   return entries.map(entry => entry.name).filter(name => !name.startsWith('.') && name !== 'node_modules').sort().join('\n')
 }
 
 /** Reads check runs and commit statuses for a commit without emitting a trigger. */
-export async function pullChecks(commands: Commands, head: string, tally?: Tally): Promise<CiSnapshot> {
+export async function pullChecks(calls: GithubCalls, head: string, tally?: Tally): Promise<CiSnapshot> {
   const page = z.looseObject({ check_runs: z.array(z.unknown()) })
-  const pages = await commands.api(z.array(page), `commits/${head}/check-runs?per_page=100`, '--paginate', '--slurp')
+  const pages = await calls.api(z.array(page), `commits/${head}/check-runs?per_page=100`, '--paginate', '--slurp')
   const runs = validItems(CheckSchema, pages.flatMap(page => page.check_runs), tally)
-  const statuses = await commands.pages(StatusSchema, `commits/${head}/statuses?per_page=100`, tally)
+  const statuses = await calls.pages(StatusSchema, `commits/${head}/statuses?per_page=100`, tally)
   const latest = new Map<string, string>()
   for (const status of statuses) if (!latest.has(status.context)) latest.set(status.context, status.state)
   const checks = runs.map(({ name, status, conclusion }) => ({ name, status, conclusion }))
@@ -82,8 +82,8 @@ const DescriptionSchema = IssueSchema.extend({
   labels: z.array(z.looseObject({ name: z.string() })).nullish(), draft: z.boolean().nullish(), merged: z.boolean().nullish(),
   head: z.looseObject({ ref: z.string() }).nullish(), base: z.looseObject({ ref: z.string() }).nullish(),
 })
-async function reviewThread(commands: Commands, number: number, comment: number, tally?: Tally): Promise<GithubComment[]> {
-  const comments = await commands.pages(CommentSchema, `pulls/${number}/comments?per_page=100`, tally)
+async function reviewThread(calls: GithubCalls, number: number, comment: number, tally?: Tally): Promise<GithubComment[]> {
+  const comments = await calls.pages(CommentSchema, `pulls/${number}/comments?per_page=100`, tally)
   const root = comments.find(item => item.id === comment)?.in_reply_to_id ?? comment
   return comments.filter(item => item.id === root || item.in_reply_to_id === root)
     .sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''))
@@ -98,15 +98,20 @@ function threadMessages(thread: GithubComment[], id: (comment: GithubComment) =>
 /**
  * Reads an Issue or PR, a page of its comments or reviews, a review thread, or a CI snapshot as model-facing
  * `{ id, from, at, text, reply_to?, path?, line?, url }` messages rather than raw GitHub API records.
+ * The repository segment is the instance ID's `~`-encoded name, so every resource names its own repository.
  */
 export async function readGithub(commands: Commands, resource: string): Promise<unknown> {
+  const hint = 'Use github/<owner~name>/issues/<number>, github/<owner~name>/pulls/<number>, or append /comments/<page>, /reviews/<page>, /thread/<comment-id> or /checks; or github/<owner~name>/commits/<sha>/checks'
+  const repo = /^github\/([A-Za-z0-9_.-]+~[A-Za-z0-9_.-]+)\//.exec(resource)
+  if (!repo) throw new Error(hint)
+  const encoded = repo[1]!
+  const calls = commands.githubRepository(encoded.replace('~', '/'))
+  const rest = resource.slice(repo[0].length - 1)
   // A commit's CI, such as the default branch's, which no PR names.
-  const commit = /^github\/commits\/([0-9a-f]{7,40})\/checks$/.exec(resource)
-  if (commit) return pullChecks(commands, commit[1]!)
-  const match = /^github\/(issues|pulls)\/([1-9]\d*)(?:\/(comments|reviews|checks|thread)(?:\/([1-9]\d*))?)?$/.exec(resource)
-  if (!match) {
-    throw new Error('Use github/issues/<number>, github/pulls/<number>, or append /comments/<page>, /reviews/<page>, /thread/<comment-id> or /checks; or github/commits/<sha>/checks')
-  }
+  const commit = /^\/commits\/([0-9a-f]{7,40})\/checks$/.exec(rest)
+  if (commit) return pullChecks(calls, commit[1]!)
+  const match = /^\/(issues|pulls)\/([1-9]\d*)(?:\/(comments|reviews|checks|thread)(?:\/([1-9]\d*))?)?$/.exec(rest)
+  if (!match) throw new Error(hint)
   const [, kind, number, section, page = '1'] = match
   if (kind === 'issues' && (section === 'reviews' || section === 'checks' || section === 'thread')) {
     throw new Error('Reviews, review threads and checks require a pull request')
@@ -114,39 +119,39 @@ export async function readGithub(commands: Commands, resource: string): Promise<
   const path = `${kind}/${number}`
   if (section === 'checks') {
     if (match[4]) throw new Error('Checks do not take a page number')
-    const pr = await commands.api(z.looseObject({ head: z.looseObject({ sha: z.string() }) }), path)
-    return pullChecks(commands, pr.head.sha)
+    const pr = await calls.api(z.looseObject({ head: z.looseObject({ sha: z.string() }) }), path)
+    return pullChecks(calls, pr.head.sha)
   }
   if (section === 'thread') {
-    if (!match[4]) throw new Error('Name the review thread by one of its comments: github/pulls/<number>/thread/<comment-id>')
-    const thread = await reviewThread(commands, Number(number), Number(match[4]))
+    if (!match[4]) throw new Error('Name the review thread by one of its comments: github/<owner~name>/pulls/<number>/thread/<comment-id>')
+    const thread = await reviewThread(calls, Number(number), Number(match[4]))
     if (!thread.length) throw new Error('No review comment of this PR has that id')
     return { messages: threadMessages(thread, item => String(item.id)) }
   }
   if (!section) {
-    const item = await commands.api(DescriptionSchema, path)
+    const item = await calls.api(DescriptionSchema, path)
     const branches = item.head && item.base ? { head: item.head.ref, base: item.base.ref } : {}
     const labels = item.labels?.length ? { labels: item.labels.map(label => label.name) } : {}
     return { number: item.number, title: item.title, state: item.state, ...item.merged ? { merged: true } : {},
       ...item.draft ? { draft: true } : {}, ...branches, ...labels, ...githubMessage(item, item.body ?? '', String(item.number)) }
   }
-  const listed = await commands.api(z.array(z.unknown()), `${path}/${section}?per_page=20&page=${page}`)
+  const listed = await calls.api(z.array(z.unknown()), `${path}/${section}?per_page=20&page=${page}`)
   const tally = { skipped: 0 }
   const items = validItems(CommentSchema, listed, tally)
   const messages = items.map(item => section === 'reviews'
     ? githubMessage({ ...item, created_at: item.submitted_at ?? item.created_at }, reviewText(item), String(item.id))
     : { ...githubMessage(item, item.body ?? '', String(item.id)), ...item.in_reply_to_id ? { reply_to: String(item.in_reply_to_id) } : {} })
   return { messages, ...tally.skipped ? { skipped: tally.skipped } : {},
-    ...listed.length === 20 ? { next_resource: `github/${kind}/${number}/${section}/${Number(page) + 1}` } : {} }
+    ...listed.length === 20 ? { next_resource: `github/${encoded}/${kind}/${number}/${section}/${Number(page) + 1}` } : {} }
 }
 /** Reads one page of an Issue or PR conversation (with the Issue/PR description first on page 1), using comment URLs as message IDs. */
-async function conversationPage(commands: Commands, number: number, page: number) {
+async function conversationPage(calls: GithubCalls, number: number, page: number) {
   const messages: ContextMessage[] = []
   if (page === 1) {
-    const issue = await commands.api(IssueSchema, `issues/${number}`)
+    const issue = await calls.api(IssueSchema, `issues/${number}`)
     messages.push(githubMessage(issue, `${issue.title}\n\n${issue.body ?? ''}`, issue.html_url))
   }
-  const listed = await commands.api(z.array(z.unknown()), `issues/${number}/comments?per_page=100&page=${page}`)
+  const listed = await calls.api(z.array(z.unknown()), `issues/${number}/comments?per_page=100&page=${page}`)
   const tally = { skipped: 0 }
   const comments = validItems(CommentSchema, listed, tally)
   messages.push(...comments.map(comment => githubMessage(comment, comment.body ?? '', comment.html_url ?? String(comment.id))))
@@ -155,10 +160,14 @@ async function conversationPage(commands: Commands, number: number, page: number
 /**
  * Context reader for a GitHub Trigger: reads the review thread for an inline review comment (whose first comment is its
  * root and parent), or the Issue/PR conversation by page otherwise (whose first page is its root and parent).
+ * The Trigger's own repository (its `meta.repository`, carried by every GitHub trigger) scopes every read.
  */
 export const githubThreadContext: ThreadContext<unknown> = {
   messageId: trigger => trigger.url ?? '',
   read: async (commands, trigger, part, cursor) => {
+    const repository = typeof trigger.meta.repository === 'string' ? trigger.meta.repository : ''
+    if (!repository) throw new Error('The GitHub trigger names no repository')
+    const calls = commands.githubRepository(repository)
     // The default branch's CI has no conversation; its Trigger is its context.
     if (typeof trigger.meta.branch === 'string') {
       const message = { id: trigger.url ?? trigger.id, from: 'CI', at: trigger.at, text: trigger.text, bot: true as const }
@@ -166,12 +175,12 @@ export const githubThreadContext: ThreadContext<unknown> = {
     }
     const number = Number(trigger.meta.number)
     if (trigger.meta.kind === 'inline' && typeof trigger.meta.commentId === 'number') {
-      const thread = await reviewThread(commands, number, trigger.meta.commentId)
+      const thread = await reviewThread(calls, number, trigger.meta.commentId)
       const messages = threadMessages(thread, item => item.html_url ?? String(item.id))
       const read = part === 'thread' ? messages : messages.slice(0, 1)
       return { messages: read, body: { status: 'review_thread', messages: read }, status: 'review_thread' }
     }
-    const body = await conversationPage(commands, number, Number(cursor ?? '1'))
+    const body = await conversationPage(calls, number, Number(cursor ?? '1'))
     return { messages: body.messages, next: body.next_resource ?? undefined, body }
   },
 }

@@ -9,7 +9,14 @@ import { SettingsSchema } from '../src/policy.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { deferred } from './fixtures/async.ts'
 import { githubKind } from '../src/sources/github.ts'
+import { githubChannel, githubInstanceId, githubThread, type Instance } from '../src/sources/github-trigger.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
+
+/** The repository the fixtures watch, and its stored Source instance (`github:acme~widgets`), which names every trigger's Source and Thread. */
+const REPOSITORY = 'acme/widgets'
+const INSTANCE = githubInstanceId(REPOSITORY)
+const instance: Instance = { source: INSTANCE, repository: REPOSITORY }
+const settings = () => SettingsSchema.parse({ sources: { [INSTANCE]: { enabled: true, config: { repository: REPOSITORY } } } })
 
 /** Assessor fixture backed by in-memory repositories and fake GitHub Issue and file reads. */
 function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.from({ length: 5 }, (_, i) => `comment ${i}`),
@@ -18,7 +25,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
     user: { login: 'bob' }, created_at: '2026-09-09T00:00:00Z', body }))
   const gate = { issue: undefined as Promise<void> | undefined }
   const commands = {
-    repository: 'acme/widgets', deployment: testDeployment(),
+    deployment: testDeployment(),
     withSignal() { return commands },
     gh: vi.fn(async (args: string[]) => {
       await gate.issue
@@ -28,16 +35,18 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
         user: { login: 'bob' }, created_at: '2026-09-09T00:00:00Z', title: 'Issue', body: 'body' }
     }),
     run: vi.fn(async () => 'export const value = 1\n'),
-    // A string first argument is a raw file path; otherwise validate the fake gh response against the schema.
-    api: vi.fn(async (schema: unknown, ...rest: string[]) => typeof schema === 'string' ? 'export const value = 1\n'
-      : (schema as { parse(value: unknown): unknown }).parse(await (commands as unknown as { gh(args: string[]): Promise<unknown> }).gh(['api', rest[0]!]))),
+    // The call pair bound to one repository. A string first argument is a raw file path; otherwise validate the fake gh response against the schema.
+    githubRepository: vi.fn((_repository: string) => ({
+      api: vi.fn(async (schema: unknown, ...rest: string[]) => typeof schema === 'string' ? 'export const value = 1\n'
+        : (schema as { parse(value: unknown): unknown }).parse(await (commands as unknown as { gh(args: string[]): Promise<unknown> }).gh(['api', rest[0]!]))),
+    })),
   } as unknown as Commands
   const repo = new MemoryRepositories()
-  const sources = new SourceRegistry(() => SettingsSchema.parse({}))
+  const sources = new SourceRegistry(settings)
   sources.register(githubKind)
   let engine!: Engine
   const host: AssessorHost = {
-    get engine() { return engine }, commands, deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
+    get engine() { return engine }, commands, deployment: testDeployment(), settings,
     threadContext: threadContext ?? (trigger => sources.threadContext(trigger)),
     effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
   }
@@ -59,8 +68,9 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   const size = () => kept.evals.size
   return { repo, engine, assessor, tools, size, gate }
 }
-const issue = (n: number): Trigger => ({ id: `issue-${n}`, source: 'github', threads: [{ source: 'github', id: String(n) }], actor: { source: 'github', id: 'bob' }, human: true,
-  at: new Date(Date.UTC(2026, 8, 9, 0, 0, n)).toISOString(), text: `issue ${n}`, url: `https://github.com/acme/widgets/issues/${n}`, meta: { number: n } })
+const issue = (n: number): Trigger => ({ id: `issue-${n}`, source: INSTANCE, threads: [{ source: INSTANCE, id: String(n) }], actor: { source: INSTANCE, id: 'bob' }, human: true,
+  at: new Date(Date.UTC(2026, 8, 9, 0, 0, n)).toISOString(), text: `issue ${n}`, url: `https://github.com/acme/widgets/issues/${n}`,
+  channel: githubChannel(instance, n, `https://github.com/acme/widgets/issues/${n}`), meta: { number: n, repository: REPOSITORY } })
 const signal = new AbortController().signal
 
 it('keeps nothing for an Eval once it is decided, as for one that timed out', async () => {
@@ -75,7 +85,7 @@ it('keeps nothing for an Eval once it is decided, as for one that timed out', as
   }
   s.engine.receive(issue(9)); s.engine.evaluateDue()
   await s.assessor.context('issue-9', signal)
-  const thread = s.repo.threads.get('github:9')!
+  const thread = s.repo.threads.get(githubThread(INSTANCE, 9))!
   s.repo.threads.save({ ...thread, expired: 2, evaluating: { ...thread.evaluating!, delivered: '2000-01-01T00:00:00.000Z', deadline: '2000-01-01T00:00:00.000Z' } })
   s.engine.evaluateDue()
   expect(s.size()).toBe(0)
@@ -137,7 +147,7 @@ it('loads a window without the assessment instructions: the trigger once, cut me
     ? 40 : 3)}`)
   const s = setup('inferred', bodies)
   const trigger = { ...issue(1), id: 'c15', text: bodies[15]!, url: 'https://github.com/acme/widgets/issues/1#c15', meta: { number: 1,
-    kind: 'comment' } }
+    kind: 'comment', repository: REPOSITORY } }
   s.engine.receive(trigger); s.engine.evaluateDue()
   const result = await s.assessor.context('c15', signal) as Record<string, unknown> & { thread: { messages: Record<string, unknown>[] } }
   expect(result).not.toHaveProperty('instructions')

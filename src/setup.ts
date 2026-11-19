@@ -28,8 +28,9 @@ export const SETUP_PROBLEMS = {
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],
   feishuUserIdentity: ['feishu', 'The bot lark-cli allows user identities (strict mode {mode}); give the bot its own lark-cli configuration in strict mode bot, as docs/006-deployment.md describes.'],
   feishuNoBot: ['feishu', 'The Feishu bot API did not return the bot\'s open_id.'],
-  popoCliFailed: ['popo', 'The POPO CLI does not work.'],
-  popoCliSignedOut: ['popo', 'The POPO CLI is not signed in.'],
+  popoCliMissing: ['popo', 'The popo-robot CLI was not found: {output}'],
+  popoCliFailed: ['popo', 'The popo-robot CLI does not work (check its credentials with popo-robot auth status --check): {output}'],
+  popoNoAccount: ['popo', 'The popo-robot CLI did not report a robot account.'],
 } as const satisfies Record<string, readonly [SetupPlace, string]>
 export type SetupCode = keyof typeof SETUP_PROBLEMS
 export interface SetupProblem { place: SetupPlace; code: SetupCode; values: Record<string, string>; detail: string }

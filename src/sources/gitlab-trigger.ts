@@ -39,16 +39,20 @@ export const NoteSchema = z.looseObject({
   }).nullish(),
 })
 export type GitlabNote = z.infer<typeof NoteSchema>
-/** An Issue as `projects/<id>/issues/<iid>` returns it. */
-export const IssueSchema = NoteSchema.extend({
-  iid: z.number(), title: z.string(), state: z.string(), created_at: z.string(), web_url: z.string(),
+/** GitLab names the text of an Issue or merge request `description`, and the text of a note `body`; both are read as `body`. */
+export const withBody = <T extends { body?: string | null; description?: string | null }>(item: T): T => ({ ...item, body: item.body ?? item.description })
+/** An Issue as `projects/<id>/issues/<iid>` returns it, before `description` is read as `body`. */
+export const IssueFields = NoteSchema.extend({
+  iid: z.number(), title: z.string(), state: z.string(), created_at: z.string(), web_url: z.string(), description: z.string().nullish(),
 }).omit({ id: true })
-/** A Merge Request as `projects/<id>/merge_requests/<iid>` returns it. */
-export const MergeRequestSchema = NoteSchema.extend({
-  iid: z.number(), title: z.string(), state: z.string(), created_at: z.string(), web_url: z.string(),
+export const IssueSchema = IssueFields.transform(withBody)
+/** A Merge Request as `projects/<id>/merge_requests/<iid>` returns it, before `description` is read as `body`. */
+export const MergeRequestFields = NoteSchema.extend({
+  iid: z.number(), title: z.string(), state: z.string(), created_at: z.string(), web_url: z.string(), description: z.string().nullish(),
   source_branch: z.string().nullish(), sha: z.string().nullish(), merge_status: z.string().nullish(),
   detailed_merge_status: z.string().nullish(),
 }).omit({ id: true })
+export const MergeRequestSchema = MergeRequestFields.transform(withBody)
 export type GitlabIssue = z.infer<typeof IssueSchema>
 export type GitlabMergeRequest = z.infer<typeof MergeRequestSchema>
 type Opened = Pick<GitlabIssue, 'iid' | 'title' | 'body' | 'author' | 'created_at' | 'web_url'>
@@ -71,15 +75,18 @@ function noteText(note: GitlabNote): string {
 }
 export const mentions = (text: string, login: string): boolean =>
   new RegExp(`(?:^|[^a-zA-Z0-9_@])@${escapeRegExp(login)}(?![a-zA-Z0-9_-])`, 'i').test(text)
-const author = (user: { username?: string | null; id?: number }, agent: string) =>
-  ({ actor: { source: SOURCE, id: user.username ?? '' }, human: !!(user.username ?? '') && !sameName(user.username ?? '', agent) })
+// The actor belongs to the instance, whose Policy part lists who may originate work there.
+// The agent's own account is an ordinary author here: `ownSkipped` already dropped what it must not hear (its replies, its merge
+// requests), and the Policy's list and admission table decide the rest.
+const author = (instance: Instance, user: { username?: string | null; id?: number }) =>
+  ({ actor: { source: instance.source, id: user.username ?? '' }, human: !!(user.username ?? '') })
 /** Builds a trigger for a note; system notes (label changes and the like) are skipped by callers. */
 export function noteTrigger(instance: Instance, note: GitlabNote, ref: NoteRef, agent: string): Trigger {
   const at = note.updated_at ?? note.created_at ?? new Date().toISOString()
   const version = note.updated_at ?? ''
   const id = key('gitlab-note', instance.source, gitlabThread(ref.kind, ref.iid), String(note.id), version)
   return { id, source: instance.source, threads: [{ source: instance.source, id: gitlabThread(ref.kind, ref.iid) }],
-    ...author(note.author, agent), at,
+    ...author(instance, note.author), at,
     text: noteText(note),
     ...(mentions(note.body ?? '', agent) ? { addressed: 'mention' as const } : {}),
     channel: gitlabChannel(instance.source, instance.project, ref.kind, ref.iid),
@@ -94,7 +101,7 @@ export function noteTrigger(instance: Instance, note: GitlabNote, ref: NoteRef, 
 export function issueTrigger(instance: Instance, issue: Opened, agent: string): Trigger {
   const body = issue.body ?? ''
   return { id: key('gitlab-issue', instance.source, String(issue.iid)), source: instance.source,
-    threads: [{ source: instance.source, id: gitlabThread('issue', issue.iid) }], ...author(issue.author, agent), at: issue.created_at,
+    threads: [{ source: instance.source, id: gitlabThread('issue', issue.iid) }], ...author(instance, issue.author), at: issue.created_at,
     text: `${issue.title}\n\n${body}`,
     ...(mentions(body, agent) ? { addressed: 'mention' as const } : {}),
     channel: gitlabChannel(instance.source, instance.project, 'issue', issue.iid), url: issue.web_url,
@@ -109,7 +116,7 @@ export function mrTrigger(instance: Instance, mr: Opened & Pick<GitlabMergeReque
 /** Builds a trigger for a default-branch pipeline transition; branch pipelines have no person to reply to, so they have no `channel`. */
 export function branchCiTrigger(instance: Instance, branch: string, sha: string, revision: number, summary: string, url: string): Trigger {
   return { id: key('gitlab-ci', instance.source, `branch:${branch}`, String(revision)), source: instance.source,
-    threads: [{ source: instance.source, id: `ci:${branch}` }], actor: { source: SOURCE, id: '' }, human: false,
+    threads: [{ source: instance.source, id: `ci:${branch}` }], actor: { source: instance.source, id: '' }, human: false,
     at: new Date().toISOString(),
     text: summary, url, meta: { ci: true, branch, sha, revision, project: instance.project } }
 }
@@ -117,7 +124,7 @@ export function pipelineCiTrigger(instance: Instance, mr: Pick<GitlabMergeReques
   summary: string): Trigger {
   return { id: key('gitlab-ci', instance.source, gitlabThread('mr', mr.iid), String(revision)), source: instance.source,
     threads: [{ source: instance.source, id: gitlabThread('mr', mr.iid) }],
-    actor: { source: SOURCE, id: '' }, human: false, at: new Date().toISOString(),
+    actor: { source: instance.source, id: '' }, human: false, at: new Date().toISOString(),
     text: summary, channel: gitlabChannel(instance.source, instance.project, 'mr', mr.iid), url: mr.web_url,
     meta: { kind: 'mr', iid: mr.iid, project: instance.project, ...(mr.author.username ? { mrAuthor: mr.author.username } : {}), ci: true, revision } }
 }

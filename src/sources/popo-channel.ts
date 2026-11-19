@@ -1,4 +1,4 @@
-/** POPO outbound channel: sends plain-text replies through the agent account and names sessions without a web link. */
+/** POPO outbound channel: sends plain-text replies as the robot through `popo-robot send` and names sessions without a web link. */
 import type { OutboundMessage } from '../core/index.ts'
 import { CliError } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
@@ -6,24 +6,24 @@ import type { SourceContext } from './host.ts'
 import type { ChannelLink } from './kind.ts'
 import { popoThreadId } from './popo-trigger.ts'
 
+/** `popo-robot` exits with 5 when the receiver or session does not exist. */
+const NOT_FOUND = 5
+
 /**
  * True when POPO permanently rejects a reply because the receiver no longer exists or cannot be messaged.
- * Only a tool failure naming a missing receiver means the session is gone; timeouts or crashes do not.
+ * Only an error naming a missing receiver means the session is gone; timeouts and crashes do not.
  */
 const gone = (error: unknown): boolean => error instanceof CliError
-  && (/not\s*(be\s*)?(found|exist)|no\s+such\s+(user|team|group)|不存在/i.test(error.message) || error.code === 404)
-/**
- * Sends a message as the agent account into the trigger's session. Arguments pass through `execFile` argv, so message
- * text needs no shell quoting; `source=AGENT` marks automation-sent messages on both direct and team chats.
- */
+  && (error.exitCode === NOT_FOUND || /not\s*(be\s*)?(found|exist)|no\s+such\s+(user|team|group)|不存在/i.test(error.message))
+
+/** Sends a message as the robot into the trigger's session: a user's account for a direct chat, the group's number for a group. */
 export async function sendPopo(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const session = message.channel.address.session
-  const type = message.channel.address.type
   if (!session) throw new Error('Missing POPO reply target')
-  const tool = type === 'group' ? 'message_send_team' : 'message_send_p2p'
   const text = checkedImText(message.text)
   try {
-    await host.commands.popo([tool, `message=${text}`, `receiver=${session}`, 'source=AGENT'])
+    // The text follows `--text` so that text starting with a dash is never read as an option.
+    await host.commands.popo(['send', session, '--text', text])
     return 'sent'
   } catch (error) {
     if (gone(error)) return 'gone'

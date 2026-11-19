@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
+import { githubInstanceId } from '../../sources/github-trigger.ts'
 import { claimMr, readMr } from '../../sources/gitlab-pull.ts'
 import { gitlabInstanceId } from '../../sources/gitlab-trigger.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -21,6 +22,8 @@ export interface ExecutorToolsHost {
   readonly github?: SourceContext
   /** GitLab Source context whose merge-request rules govern claiming a reported MR; absent while GitLab is unconfigured. */
   readonly gitlab?: SourceContext
+  /** The repository instance a ticket reports against when its origin trigger names none: the first enabled one of the kind. */
+  defaultRepository(kind: 'github' | 'gitlab'): string | undefined
   sendReplies(): Promise<void>
 }
 
@@ -91,17 +94,21 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
         if (args.pr_number != null && !host.github) throw new Error('The GitHub Source is not configured; report the work through mr_iid or the summary alone')
-        const pull = args.pr_number != null && host.github ? await readPull(host.github, args.pr_number, signal) : undefined
-        if (args.mr_iid != null && !host.gitlab) throw new Error('The GitLab Source is not configured; report the work through pr_number or the summary alone')
-        // The MR belongs to the ticket's own GitLab project (its origin trigger's), or the account's default project for chat-originated tickets.
+        // The PR or MR belongs to the ticket's own repository (its origin trigger's), or the first enabled one for chat-originated tickets.
         const origin = host.store.triggers.get(current.origin.triggerId)
-        const project = typeof origin?.meta.project === 'string' && origin.meta.project ? origin.meta.project : host.gitlab?.deployment.gitlab?.defaultProject
-        if (args.mr_iid != null && !project) throw new Error('This ticket names no GitLab project and the account has no default project; report through the summary alone')
+        const named = (key: string) => typeof origin?.meta[key] === 'string' && origin.meta[key] ? origin.meta[key] as string : undefined
+        const repository = named('repository') ?? host.defaultRepository('github')
+        if (args.pr_number != null && !repository) throw new Error('This ticket names no GitHub repository and none is watched; report through the summary alone')
+        const pullInstance = args.pr_number != null && repository ? { source: githubInstanceId(repository), repository } : undefined
+        const pull = args.pr_number != null && host.github && pullInstance ? await readPull(host.github, pullInstance, args.pr_number, signal) : undefined
+        if (args.mr_iid != null && !host.gitlab) throw new Error('The GitLab Source is not configured; report the work through pr_number or the summary alone')
+        const project = named('project') ?? host.defaultRepository('gitlab')
+        if (args.mr_iid != null && !project) throw new Error('This ticket names no GitLab project and none is watched; report through the summary alone')
         const instance = args.mr_iid != null && host.gitlab && project ? { source: gitlabInstanceId(project), project } : undefined
         const mr = args.mr_iid != null && host.gitlab && instance ? await readMr(host.gitlab, instance, args.mr_iid, signal) : undefined
         // Claim the PR or MR, record the report, and queue the relay atomically so a rejected claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
-          const refusedPull = pull && host.github && claimPull(host.github, ticketId, pull)
+          const refusedPull = pull && host.github && pullInstance && claimPull(host.github, ticketId, pullInstance, pull)
           if (refusedPull) throw new Error(refusedPull)
           const refusedMr = mr && host.gitlab && instance && claimMr(host.gitlab, ticketId, instance, mr)
           if (refusedMr) throw new Error(refusedMr)

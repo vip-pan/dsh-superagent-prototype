@@ -16,7 +16,12 @@ export function valueLabel(t: T, group: string, key: string | undefined): string
   if (!key) return ''
   const name = `${group}.${key}` as DshSuperagentKey
   const text = t(name)
-  return text === name ? key : text
+  if (text !== name || group !== 'source' || !key.includes(':')) return text === name ? key : text
+  // An instance of a multi-instance Source reads as its kind and the last segment of its name, as in GitHub · widgets.
+  const [kind = '', instance = ''] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)]
+  const label = t(`${group}.${kind}` as DshSuperagentKey)
+  const short = instance.slice(instance.lastIndexOf('~') + 1)
+  return label === `${group}.${kind}` ? key : `${label} · ${short}`
 }
 /** Format one or more structured or raw reasons in the active UI language, truncating multi-line host errors to their first line. */
 export function reasonLabel(t: T, reason: string | Reason | readonly Reason[] | undefined): string {

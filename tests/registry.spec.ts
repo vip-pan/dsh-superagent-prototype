@@ -24,9 +24,9 @@ describe('Source registry', () => {
     const settings = SettingsSchema.parse({ sources: { probe: { enabled: false, config: { interval: 9 } }, retired: { enabled: true, config: { x: 1 } } } })
     const sources = new SourceRegistry(() => settings)
     sources.register(probe); sources.register(githubKind)
+    // A multi-instance kind lists its account entry, which holds the account's defaults only, and no instance until one is stored.
     expect(sources.instances()).toEqual([
-      { id: 'github', kind: 'github', enabled: true, config: { repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3,
-        observeIssues: false, observePulls: false, observeComments: false, observeCi: false }, installed: true },
+      { id: 'github', kind: 'github', enabled: true, config: { cli: '', failuresBeforeError: 3 }, installed: true },
       { id: 'probe', kind: 'probe', enabled: false, config: { interval: 9 }, installed: true },
       { id: 'retired', kind: 'retired', enabled: true, config: { x: 1 }, installed: false },
     ])
@@ -110,8 +110,12 @@ describe('Source registry', () => {
   it('finds what a search query names in each kind\'s terms', () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({}))
     sources.register(feishuKind); sources.register(githubKind)
-    expect(sources.find('#12')).toEqual({ threads: ['github:12'], terms: [] })
-    expect(sources.find('https://github.com/acme/widgets/pull/7#issuecomment-3')).toEqual({ threads: ['github:7'], terms: [] })
+    // A GitHub number names a thread in a stored, enabled repository instance; with none there is nothing to find it in.
+    expect(sources.find('#12')).toEqual({ threads: [], terms: [] })
+    const stored = SettingsSchema.parse({ sources: { 'github:acme~widgets': { enabled: true, config: { repository: 'acme/widgets' } },
+      'github:acme~off': { enabled: false, config: { repository: 'acme/off' } } } })
+    expect(sources.find('#12', stored)).toEqual({ threads: ['github:acme~widgets:12'], terms: [] })
+    expect(sources.find('https://github.com/acme/widgets/pull/7#issuecomment-3', stored)).toEqual({ threads: ['github:acme~widgets:7'], terms: [] })
     expect(sources.find('see om_abc and om_abc, om_def')).toEqual({ threads: [], terms: ['om_abc', 'om_def'] })
     expect(sources.find('login fails')).toEqual({ threads: [], terms: [] })
     expect(feishuKind.policy!.unnamed).toEqual({ person: { zh: '飞书用户', en: 'Feishu user' }, bot: { zh: '飞书机器人', en: 'Feishu bot' } })

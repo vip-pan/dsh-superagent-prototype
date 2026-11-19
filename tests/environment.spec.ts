@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
+import { GIT_LOCATION, POPO_WORKER_DENY, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -37,8 +37,16 @@ describe('worker shims', () => {
     const bin = workerBin(dir)
     await expect(exec(join(bin, 'lark-cli'), ['im', '+chat-list'])).rejects.toMatchObject({ code: 1, stderr: 'lark-cli is unavailable: this installation has no Feishu bot.\n' })
     await expect(exec(join(bin, 'glab'), ['api', 'user'])).rejects.toMatchObject({ code: 1, stderr: 'glab is unavailable: this installation has no GitLab project.\n' })
-    await expect(exec(join(bin, 'popo-cli'), ['auth', 'status'])).rejects.toMatchObject({ code: 1, stderr: 'popo-cli is unavailable: this installation has no POPO account.\n' })
-    await expect(exec(join(bin, 'personal-gh'), [])).rejects.toMatchObject({ code: 1, stderr: 'personal-gh is blocked in this installation; use gh, glab, or popo-cli, which act as the deployment\'s accounts.\n' })
+    await expect(exec(join(bin, 'personal-gh'), [])).rejects.toMatchObject({ code: 1, stderr: 'personal-gh is blocked in this installation; use gh, glab, lark-cli, or popo-robot, which act as the deployment\'s accounts.\n' })
+  })
+  it('make `popo-robot` fail without a POPO robot, and with one limit it to the ticket\'s session and the non-administrative commands', async () => {
+    await writeEnvironment(testDeployment({ stateDir: dir }), [])
+    await expect(exec(join(workerBin(dir), 'popo-robot'), ['whoami'])).rejects.toMatchObject({ code: 1, stderr: 'popo-robot is unavailable: this installation has no POPO robot.\n' })
+    const cli = program(join(dir, 'popo-agent'), 'echo "$POPO_ROBOT_ALLOW_RECEIVERS|$POPO_ROBOT_DENY|$*"')
+    await writeEnvironment(testDeployment({ stateDir: dir, popo: { cli, uid: 'bot@app' } }), [])
+    const run = async (chat?: string) => (await exec(join(workerBin(dir), 'popo-robot'), ['history', 'g'], { env: { ...process.env, ...chat ? { DSH_SUPERAGENT_POPO_CHAT: chat } : {} } })).stdout.trim()
+    expect(await run('1000014361')).toBe(`1000014361|${POPO_WORKER_DENY}|history g`)
+    expect((await run()).startsWith('none|')).toBe(true)
   })
   it('keep `gh` and `lark-cli` working, and shim no `git`, when the blocked commands name the commands workers need', async () => {
     const gh = program(join(dir, 'gh-agent'), 'echo gh "$@"'), lark = program(join(dir, 'lark-bot'), 'echo lark "$@"')
@@ -51,7 +59,7 @@ describe('worker shims', () => {
   it('replace only what dsh-superagent wrote and refuse anything else in its places', async () => {
     await writeEnvironment(testDeployment({ stateDir: dir }), ['old-cli'])
     await writeEnvironment(testDeployment({ stateDir: dir }), [])
-    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-cli'])
+    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-robot'])
     // A file that merely contains the marker on a later line, a symlink to a shim, and a foreign gitconfig are all rejected.
     writeFileSync(join(workerBin(dir), 'notes'), `notes\nmore\n${readFileSync(join(workerBin(dir), 'gh'), 'utf8').split('\n')[1]}\n`)
     await expect(writeEnvironment(testDeployment({ stateDir: dir }), [])).rejects.toThrow(`${join(workerBin(dir), 'notes')} was not written by dsh-superagent`)
@@ -68,7 +76,7 @@ describe('worker shims', () => {
     const legacy = (file: string, name: string) => writeFileSync(file, readFileSync(file, 'utf8').replace('Written by dsh-superagent', `Written by ${name}`))
     legacy(join(workerBin(dir), 'old-cli'), 'dsh-tag'); legacy(join(workerBin(dir), 'older-cli'), 'dsh-freelancer'); legacy(workerGitConfig(dir), 'dsh-go')
     await writeEnvironment(testDeployment({ stateDir: dir }), [])
-    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-cli'])
+    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'glab', 'lark-cli', 'popo-robot'])
     expect(readFileSync(workerGitConfig(dir), 'utf8')).toContain('Written by dsh-superagent')
   })
 })

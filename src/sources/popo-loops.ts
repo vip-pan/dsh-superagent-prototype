@@ -1,30 +1,30 @@
-/** POPO background loop: windowed message_search polling of all the account's sessions, newest page first. */
+/** POPO background loop: one `popo-robot listen` process delivering the robot's events as NDJSON lines, each a message to receive. */
+import { spawn } from 'node:child_process'
+import { createInterface } from 'node:readline'
+import { setTimeout as delay } from 'node:timers/promises'
+import { join } from 'node:path'
+import { z } from 'zod'
 import { threadKey, type Trigger } from '../core/index.ts'
-import { validItems } from '../infra/commands.ts'
+import type { PopoBot } from '../deployment.ts'
 import { KV } from '../kv.ts'
 import { health, type SourceContext } from './host.ts'
 import { pause } from './poll.ts'
-import { pollFailure } from './github.ts'
-import { MessageRowSchema, popoTrigger, SearchPageSchema, SOURCE, toolData, type MessageRow } from './popo-trigger.ts'
+import { consumerRetry } from './feishu-loops.ts'
+import { eventMessage, PopoLineSchema, popoTrigger, SOURCE, type PopoLine, type PopoMessage } from './popo-trigger.ts'
 import type { PopoConfig } from './popo.ts'
 
-/** The KV cursor of the global ingest window; per-thread seen lists deduplicate the deliberate overlap. */
-const CURSOR = '__cursor__'
-/** Search results can lag message arrival by seconds; the window re-reads the last minute and dedup filters it. */
-const OVERLAP_MS = 60_000
-/** Server-side index lag is absorbed by rewinding the cursor; never let it stall progress. */
-const CURSOR_LAG_MS = 30_000
 const SEEN_LIMIT = 200
-const PAGES = 10
-/** A single failed search stays quiet; three consecutive failures report, matching the GitHub Source's default. */
+/** A failed connection stays quiet; three in a row report. */
 const FAILURES_BEFORE_ERROR = 3
+/** How often a running connection checks that the Source is still on. */
+const SWITCH_CHECK_MS = 5000
 
 const settings = (ctx: SourceContext): PopoConfig | undefined => ctx.config<PopoConfig>(SOURCE)
 
 /** True when the session's messages pass the Source's receive switches; the Policy's admission still applies downstream. */
-function listened(row: MessageRow, config: PopoConfig): boolean {
-  if (row.sessionType !== 3) return config.directMessages
-  return config.chats.some(chat => chat.chatId === row.session_id) || config.otherChats === 'mentions'
+export function listened(message: PopoMessage, config: PopoConfig): boolean {
+  if (!message.group) return config.directMessages
+  return config.chats.some(chat => chat.chatId === message.session) || config.otherChats === 'mentions'
 }
 
 /** True when `id` is new for the thread; remembers it and trims the remembered ids to `SEEN_LIMIT`. */
@@ -38,69 +38,91 @@ function seen(ctx: SourceContext, thread: string, id: string): boolean {
 async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
   await ctx.receive(trigger)
   for (const ref of trigger.threads) {
-    const session = String(trigger.meta.session ?? '')
-    const name = trigger.meta.sessionName ? String(trigger.meta.sessionName) : session
-    const chat = trigger.meta.sessionType === 'group'
-      ? { value: name } : { value: { zh: '私聊', en: 'Direct message' } }
+    const chat = trigger.meta.sessionType === 'group' ? { value: String(trigger.meta.session) } : { value: { zh: '私聊', en: 'Direct message' } }
     ctx.threads.describe(threadKey(ref), { facts: { chat } })
-    const sessions = ctx.state.get(KV.popo.sessions) ?? {}
-    ctx.state.set(KV.popo.sessions, { ...sessions, [session]: true })
+    ctx.state.set(KV.popo.sessions, { ...ctx.state.get(KV.popo.sessions) ?? {}, [String(trigger.meta.session)]: true })
   }
 }
 
-/** Reads every new message of the window, in every session the account can search, and receives the listened ones. */
-async function pollWindow(ctx: SourceContext, signal: AbortSignal): Promise<{ count: number }> {
-  const config = settings(ctx)!
-  const account = ctx.deployment.popo?.uid ?? ''
-  const commands = ctx.commands.withSignal(signal)
-  const now = Date.now()
-  const previous = ctx.state.get(KV.popo.history(CURSOR))
-  if (!previous) { ctx.state.set(KV.popo.history(CURSOR), new Date(now).toISOString()); return { count: 0 } }
-  const start = Math.max(Date.parse(previous) - OVERLAP_MS, now - 24 * 3600_000)
-  const rows: MessageRow[] = []
-  for (let page = 0; page < PAGES; page++) {
-    const args = ['message_search', 'type=1', `page=${page}`, 'pageSize=50', 'msgType=0', `timeStart=${start}`, `timeEnd=${now + 1000}`]
-    const payload = toolData<Record<string, unknown>>(await commands.popo(args), 'result_list')
-    const result = SearchPageSchema.parse(payload)
-    rows.push(...validItems(MessageRowSchema, result.result_list ?? []))
-    if (result.has_more !== true && result.has_more !== 1) break
-  }
-  let count = 0
-  for (const row of rows) {
-    const trigger = popoTrigger(row, account)
-    if (!trigger || !listened(row, config)) continue
-    const thread = trigger.threads[0]!.id
-    if (!seen(ctx, thread, trigger.meta.messageId as string)) continue
-    await receive(ctx, trigger)
-    count++
-  }
-  const advanced = new Date(Math.max(Date.parse(previous), now - CURSOR_LAG_MS)).toISOString()
-  ctx.state.set(KV.popo.history(CURSOR), advanced)
-  return { count }
+/** Receives the message of one event when its session is listened to and the Source is on. */
+export async function handleEvent(ctx: SourceContext, line: PopoLine): Promise<boolean> {
+  const config = settings(ctx), bot = ctx.deployment.popo
+  if (!config || !bot) return false
+  const message = eventMessage(line)
+  if (!message || !listened(message, config)) return false
+  const trigger = popoTrigger(message, bot.uid)
+  if (!trigger || !seen(ctx, trigger.threads[0]!.id, message.id)) return false
+  await receive(ctx, trigger)
+  return true
+}
+
+/** A status line of `popo-robot listen`: its connection state, with the reason when it is not ready. */
+const StatusSchema = z.looseObject({ type: z.literal('status'), state: z.string(), detail: z.string().nullish() })
+
+/**
+ * Runs one `popo-robot listen` until it exits or `signal` aborts. Its deduplication state lives beside the Source's own state so a restart
+ * does not replay what it already delivered. Status lines drive the Source's health; event lines are received in order.
+ */
+async function listen(ctx: SourceContext, bot: PopoBot, signal: AbortSignal): Promise<void> {
+  const state = join(ctx.deployment.stateDir, 'popo-listen.json')
+  const child = spawn(bot.cli, ['listen', '--state-file', state], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env })
+  const stdout = createInterface({ input: child.stdout }), stderr = createInterface({ input: child.stderr })
+  let chain = Promise.resolve(), diagnostic = '', failures = 0
+  const stop = (): void => { child.kill('SIGTERM') }
+  signal.addEventListener('abort', stop, { once: true })
+  stderr.on('line', (line: string) => { diagnostic = line.slice(0, 2000) })
+  stdout.on('line', (text: string) => {
+    chain = chain.then(async () => {
+      if (text.length > 1_048_576) throw new Error('POPO event exceeds 1 MiB')
+      const json: unknown = JSON.parse(text)
+      const status = StatusSchema.safeParse(json)
+      if (status.success) {
+        if (status.data.state === 'ready') { failures = 0; ctx.report(SOURCE, { state: 'ready', detail: 'Connected', at: new Date().toISOString() }) }
+        else if ((status.data.state === 'reconnecting' || status.data.state === 'failed') && !signal.aborted) {
+          failures += 1
+          if (failures >= FAILURES_BEFORE_ERROR) ctx.report(SOURCE, health('error', 'connectionFailures', { count: String(failures), error: status.data.detail ?? diagnostic }))
+        }
+        return
+      }
+      const line = PopoLineSchema.safeParse(json)
+      // Events read after the Source is switched off are dropped; the process stops within seconds.
+      if (line.success && settings(ctx)) await handleEvent(ctx, line.data)
+    }).catch(error => { ctx.report(SOURCE, { state: 'error', detail: String(error) }) })
+  })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', code => signal.aborted ? resolve() : reject(new Error(`popo-robot listen exited (${code}): ${diagnostic}`)))
+    })
+  } finally { signal.removeEventListener('abort', stop); stdout.close(); stderr.close(); await chain }
 }
 
 async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
-  let failures = 0
   await ctx.ready
   if (!ctx.configured()) { ctx.report(SOURCE, health('paused', 'setupPending')); return }
+  let retry: number | undefined
   while (!signal.aborted) {
-    const config = settings(ctx)
-    try {
-      if (config) {
-        const { count } = await pollWindow(ctx, signal)
-        if (!signal.aborted) ctx.report(SOURCE, { state: 'ready', detail: `${count} messages; next poll ≥ ${config.pollSeconds}s`, at: new Date().toISOString() })
-      } else ctx.report(SOURCE, health('paused', 'sourceOff'))
-      failures = 0
-    } catch (error) {
-      failures += 1
-      const failed = pollFailure(failures, FAILURES_BEFORE_ERROR, error)
-      if (!signal.aborted && failed) ctx.report(SOURCE, failed)
+    const bot = ctx.deployment.popo
+    if (!settings(ctx)) ctx.report(SOURCE, health('paused', 'sourceOff'))
+    else if (!bot) ctx.report(SOURCE, health('paused', 'popoUnset'))
+    else {
+      // The process runs while the Source is on; switching it off stops it.
+      const running = new AbortController()
+      const stop = () => running.abort()
+      signal.addEventListener('abort', stop, { once: true })
+      const timer = setInterval(() => { if (!settings(ctx)) running.abort() }, SWITCH_CHECK_MS)
+      const began = Date.now()
+      try { await listen(ctx, bot, running.signal) }
+      catch (error) { if (!running.signal.aborted) ctx.report(SOURCE, health('error', 'connectionFailures', { count: '1', error: String(error) })) }
+      finally { clearInterval(timer); signal.removeEventListener('abort', stop) }
+      if (signal.aborted) break
+      if (!running.signal.aborted) { retry = consumerRetry(retry, Date.now() - began); await delay(retry, undefined, { signal }).catch(() => {}); continue }
     }
-    await pause((config?.pollSeconds ?? 60) * 1000, signal)
+    await pause(SWITCH_CHECK_MS, signal)
   }
 }
 
-/** Runs the POPO polling loop until `signal` aborts; `apply` contains an escaping failure as source health. */
+/** Runs the POPO listener until `signal` aborts; `apply` contains an escaping failure as source health. */
 export function runPopo(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   return watch(ctx, signal)
 }

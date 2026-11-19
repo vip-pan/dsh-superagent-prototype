@@ -38,10 +38,12 @@ export const USER_ERRORS = {
   panelOnlyAccounts: ['refused', 'Source fields that setup reads, such as account CLIs, can only be changed in the management panel'],
   setupComplete: ['refused', 'Setup is complete'],
   modelUnavailable: ['refused', 'The {block} model is not available: {error}'],
+  prepareSyntax: ['refused', 'The prepare command is not valid shell syntax: {error}'],
   promptTooLong: ['refused', 'Prompt configuration exceeds {limit} characters'],
   promptPlaceholders: ['refused', 'The “{part}” template must keep {placeholders}, which the system fills in'],
   promptPartEmpty: ['refused', 'The “{part}” part cannot be empty; reset it to follow its built-in text'],
   sourceNotInstalled: ['refused', 'The {source} Source kind is not installed'],
+  accountDisabled: ['refused', 'The {source} Source is off; turn it on before turning on a repository or project under it'],
   noLabels: ['refused', 'This Source has no names to refresh'],
   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>

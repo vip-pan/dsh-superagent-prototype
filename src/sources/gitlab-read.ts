@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import type { ThreadFact } from '../core/index.ts'
 import { validItems, type Commands, type Tally } from '../infra/commands.ts'
-import { IssueSchema, MergeRequestSchema, NoteSchema, isHumanLogin, notePlace, gitlabThread, type GitlabNote, type GitlabKind } from './gitlab-trigger.ts'
+import { IssueFields, IssueSchema, MergeRequestSchema, NoteSchema, withBody, isHumanLogin, notePlace, gitlabThread, type GitlabNote, type GitlabKind } from './gitlab-trigger.ts'
 import type { ContextMessage, ThreadContext } from './kind.ts'
 
 /** The bound `api`/`pages` pair of one configured project, as `Commands.gitlabProject(project)` returns. */
@@ -75,10 +75,10 @@ function gitlabMessage(item: Pick<GitlabNote, 'author' | 'created_at' | 'updated
     ...path ? { path, ...line != null ? { line } : {} } : {} }
 }
 const NoteThreadSchema = NoteSchema.extend({ web_url: z.string().nullish() })
-const DescriptionSchema = IssueSchema.extend({
+const DescriptionSchema = IssueFields.extend({
   labels: z.array(z.looseObject({ title: z.string() })).nullish(), draft: z.boolean().nullish(), merged: z.boolean().nullish(),
   source_branch: z.string().nullish(), target_branch: z.string().nullish(),
-})
+}).transform(withBody)
 /** Reads the notes of one discussion: the note with the given ID, then every note sharing its `discussion_id`. */
 async function noteThread(calls: GitlabCalls, kind: GitlabKind, iid: number, note: number, tally?: Tally): Promise<GitlabNote[]> {
   const notes = await validItems(NoteThreadSchema, await calls.api(z.array(z.unknown()), `${kind === 'mr' ? 'merge_requests' : 'issues'}/${iid}/notes?per_page=100`), tally)

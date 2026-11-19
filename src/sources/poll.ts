@@ -12,6 +12,19 @@ export function polled(ctx: SourceContext, thread: Thread, now = Date.now()): bo
     .map(Date.parse).filter(Number.isFinite)
   return now - Math.max(...times) < POLL_HORIZON_MS
 }
+/** The start of the HTML marker every delivered reply ends with; it names the delivery, so a retry never posts twice. */
+export const SELF_MARKER = '<!-- dsh-superagent:'
+/**
+ * True when an item written by the agent's own account must not reach the Policy. The agent and its workers speak through that
+ * account, so what they write is not a request: their replies (they carry the delivery marker), their comments that do not
+ * mention the agent, and their merge requests and PRs (the agent's own work, followed from its ticket) are skipped. Everything else
+ * the account writes, such as a new Issue or a comment that mentions the agent, is an ordinary item: the Policy's list and
+ * admission table decide it like anyone else's, so a single account can test itself.
+ */
+export function ownSkipped(mine: boolean, body: string | null | undefined, kind: 'issue' | 'change' | 'comment', addressed = false): boolean {
+  if (!mine) return false
+  return kind === 'change' || (body ?? '').includes(SELF_MARKER) || (kind === 'comment' && !addressed)
+}
 /** Steps a poll start timestamp back by 5 seconds so late-arriving remote events are not missed; deterministic trigger IDs deduplicate overlaps. */
 export const cursorAt = (started: string): string => new Date(Date.parse(started) - 5000).toISOString()
 /** Polls each subscribed Thread of `source` within the horizon independently; records failures on the Thread as `pollError` (unless `stopped()`) and clears `pollError` on success. */
