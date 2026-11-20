@@ -184,7 +184,9 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
       en: 'The ticket directory' } },
       { key: 'DSH_SUPERAGENT_NAME', description: { zh: '工单短名', en: 'Short name' } }] },
     { owner: 'github', enabled: false, variables: [{ key: 'DSH_SUPERAGENT_GITHUB_REPOSITORY', description: { zh: '仓库',
-      en: 'Repository' } }] }] },
+      en: 'Repository' } }] }],
+    repositories: [{ id: 'github:acme~widgets', kind: 'github', repository: 'acme/widgets', path: '/srv/clones/widgets', configured: true,
+      tags: ['backend'], calls: ['acme/gateway'] }] },
 })
 const overviewView = (): ApiResponse<'GET overview'> => {
   const { problem, feishuProblem } = server.setup

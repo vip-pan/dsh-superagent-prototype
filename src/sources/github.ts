@@ -14,6 +14,7 @@ import { health, sourceContext, type Health, type SourceContext, type SourceHost
 import { KV } from '../kv.ts'
 import { cursorAt, ownSkipped, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
+import { repositoryFields, RepositoryShape } from '../repositories.ts'
 import { z } from 'zod'
 
 export { commentTrigger, type GithubComment } from './github-trigger.ts'
@@ -28,6 +29,7 @@ export type GithubAccountConfig = z.infer<typeof GithubAccountSchema>
 /** One repository instance card: which repository it watches, how often, and what it receives beyond direct notifications. */
 const GithubInstanceSchema = z.object({
   repository: z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/name'),
+  ...RepositoryShape,
   pollSeconds: z.number().int().min(60).max(3600).default(60),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
   observeCi: z.boolean().default(false),
@@ -58,6 +60,7 @@ export const githubKind: SourceKind<GithubAccountConfig, GithubInstanceConfig> =
     fields: [
       { key: 'repository', type: 'text', pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+', label: { zh: '监听的仓库', en: 'Repository' },
         hint: { zh: '写作 owner/name。这个实例接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。', en: 'Written owner/name. This instance receives the repository\'s notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent.' } },
+      ...repositoryFields(),
       { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
       { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repository' },
         hint: { zh: '打开后，没有 @ 智能体的新 Issue 也会收到，由策略的接收表决定是否成为候选。从打开的时候开始，不读以前的。', en: 'New Issues that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates. Starts when switched on; earlier ones are not read.' } },

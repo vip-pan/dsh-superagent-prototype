@@ -11,7 +11,7 @@ import type { Tickets } from './tickets.ts'
 /** An outcome for the Eval that holds a Trigger; `evalId` names the Eval it was judged for, so a later Eval refuses it. */
 export type Outcome = AssessmentOutcome & { evalId?: string }
 /** What an Eval ends with, as its Decision records it. */
-interface Finished { kind: DecisionKind; reason: Reason[]; audit?: Record<string, unknown>; ticketId?: string; mandate?: Mandate }
+interface Finished { kind: DecisionKind; reason: Reason[]; audit?: Record<string, unknown>; ticketId?: string; ticketIds?: string[]; mandate?: Mandate }
 /** An outcome's reason: a code it carries, else the words its assessor or person wrote. */
 const reasonOf = (reason: string | Reason): Reason[] => [typeof reason === 'string' ? said(reason) : reason]
 const stronger = (a: Strength, b: Strength): Strength => a === 'explicit' || b === 'explicit' ? 'explicit' : 'inferred'
@@ -310,8 +310,20 @@ export class Evals extends EnginePart {
     const mandate: Mandate = { strength, policyVersion, basis, actor, scope: outcome.scope }
     const ticketId = key('ticket', evaluation.id)
     const audit = outcome.audit ? { audit: outcome.audit } : {}
-    const decision = this.finish(thread, evaluation, { kind: 'accept', reason: reasonOf(outcome.reason), ...audit, mandate, ticketId })
-    this.tickets.create(ticketId, decision.id, mandate, evaluation, outcome, at)
+    // One ticket for each repository the request is submitted to; the first keeps the id an accept always had.
+    const repositories = [...new Set(outcome.repositories ?? [])]
+    const ids = repositories.map((repository, index) => index ? key('ticket', evaluation.id, repository) : ticketId)
+    const decision = this.finish(thread, evaluation, { kind: 'accept', reason: reasonOf(outcome.reason), ...audit, mandate, ticketId,
+      ...ids.length > 1 ? { ticketIds: ids } : {} })
+    if (!repositories.length) { this.tickets.create(ticketId, decision.id, mandate, evaluation, outcome, at); return decision }
+    repositories.forEach((repository, index) => {
+      const others = repositories.length > 1 ? `\nThis request is submitted to ${repositories.length} repositories, one ticket each: ${repositories.map((item, position) => `${item} (ticket ${ids[position]})`).join(', ')}. This ticket changes ${repository} only; the others change theirs, so do not edit those repositories.` : ''
+      const note = [outcome.note, others.trim()].filter(Boolean).join('\n')
+      // The acknowledgement is posted once, by the first ticket.
+      const { acknowledgement, ...rest } = outcome
+      this.tickets.create(ids[index]!, decision.id, mandate, evaluation, { ...rest, ...index || !acknowledgement ? {} : { acknowledgement },
+        ...note ? { note } : {}, repository }, at)
+    })
     return decision
   }
   /** Record an Eval's Decision; the Thread's own Eval ends with it, while a gate-only one leaves the Thread's Eval going. */
@@ -328,7 +340,7 @@ export class Evals extends EnginePart {
     const at = this.now()
     const decision: Decision = { id: key('decision', evaluation.id), evalId: evaluation.id, threadKey: thread.key, triggerIds: evaluation.triggerIds,
       policyVersion: evaluation.policyVersion, at, kind: outcome.kind, reason: outcome.reason, strength: evaluation.strength,
-      ...(outcome.ticketId ? { ticketId: outcome.ticketId } : {}), ...(outcome.mandate ? { mandate: outcome.mandate } : {}), ...(outcome.audit ? { audit: outcome.audit } : {}) }
+      ...(outcome.ticketId ? { ticketId: outcome.ticketId } : {}), ...(outcome.ticketIds ? { ticketIds: outcome.ticketIds } : {}), ...(outcome.mandate ? { mandate: outcome.mandate } : {}), ...(outcome.audit ? { audit: outcome.audit } : {}) }
     this.repo.decisions.save(decision)
     for (const id of evaluation.triggerIds) {
       const disposition = this.repo.triggers.disposition(id) ?? { fanout: [], at }

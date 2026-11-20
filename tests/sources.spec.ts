@@ -1066,7 +1066,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
   // The account carries the CLI and the failure threshold; each watched repository carries its own address and switches.
   expect(githubKind.schema.parse({})).toEqual({ cli: '', failuresBeforeError: 3 })
-  expect(githubKind.multi!.schema.parse({ repository: REPOSITORY })).toEqual({ repository: REPOSITORY, pollSeconds: 60, observeIssues: false,
+  expect(githubKind.multi!.schema.parse({ repository: REPOSITORY })).toEqual({ repository: REPOSITORY, localPath: '', tags: '', calls: '', pollSeconds: 60, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {
