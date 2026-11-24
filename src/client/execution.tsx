@@ -72,7 +72,7 @@ function EnvironmentVariables({ groups, sources,
     </div>
   </DisclosureRow>
 }
-/** Every enabled repository with the clone its tickets are made from, tags and calls. */
+/** Every enabled repository with the clone its tickets are made from. */
 function RepositoryClones({ repositories }: { repositories: SettingsView['environment']['repositories'] }) {
   const { t } = usePanel()
   const [open, setOpen] = useState(false)
@@ -81,12 +81,10 @@ function RepositoryClones({ repositories }: { repositories: SettingsView['enviro
     <div className="dt-disclosure-body">
       <Hint>{t('repositoryClonesHint')}</Hint>
       {repositories.length === 0 ? <Hint>{t('repositoryClonesEmpty')}</Hint> : <table className="dt-table">
-        <thead><tr><th>{t('repositoryName')}</th><th>{t('repositoryClonePath')}</th><th>{t('repositoryTags')}</th><th>{t('repositoryCalls')}</th></tr></thead>
+        <thead><tr><th>{t('repositoryName')}</th><th>{t('repositoryClonePath')}</th></tr></thead>
         <tbody>{repositories.map(item => <tr key={item.id}>
           <td className="dt-mono">{item.repository}</td>
           <td className="dt-mono">{item.path}{!item.configured && <span className="dt-hint"> · {t('repositoryCloneDefault')}</span>}</td>
-          <td>{item.tags.join(', ')}</td>
-          <td className="dt-mono">{item.calls.join(', ')}</td>
         </tr>)}</tbody>
       </table>}
     </div>

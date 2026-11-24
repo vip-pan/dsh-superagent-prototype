@@ -155,7 +155,22 @@ export function dropLegacyPopo<T>(data: T): T {
   const config = listed ? { ...rest, chats: (chats as unknown[]).map(chat => { if (!isRecord(chat)) return chat; const { listen: _listen, ...kept } = chat; return kept }) } : rest
   return { ...data, sources: { ...data.sources, popo: { ...stored, config } } } as T
 }
-export const SettingsSchema = z.preprocess(data => dropLegacyPopo(splitLegacyGithub(splitLegacyGitlab(data))), z.object({
+/**
+ * Drops the `tags` and `calls` a repository instance card once held (the repository chain moved out to the knowledge the team
+ * connects); a stored one would fail the instance schema's strict check. Idempotent.
+ */
+export function dropLegacyChain<T>(data: T): T {
+  if (!isRecord(data) || !isRecord(data.sources)) return data
+  const stale = Object.entries(data.sources).filter(([id, stored]) => /^(?:github|gitlab):/.test(id) && isRecord(stored) && isRecord(stored.config) && ('tags' in stored.config || 'calls' in stored.config))
+  if (!stale.length) return data
+  const sources: Record<string, unknown> = { ...data.sources }
+  for (const [id, stored] of stale) {
+    const { tags: _tags, calls: _calls, ...config } = (stored as { config: Record<string, unknown> }).config
+    sources[id] = { ...(stored as object), config }
+  }
+  return { ...data, sources } as T
+}
+export const SettingsSchema = z.preprocess(data => dropLegacyChain(dropLegacyPopo(splitLegacyGithub(splitLegacyGitlab(data)))), z.object({
   paused: z.boolean().default(false),
   sources: z.record(z.string().regex(SOURCE_KEY_REGEX), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),

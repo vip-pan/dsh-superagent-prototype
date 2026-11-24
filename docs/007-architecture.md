@@ -359,7 +359,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
 | `src/sources/kind.ts` | The `SourceKind` protocol |
-| `src/repositories.ts` | The repositories dsh-superagent develops: each GitHub or GitLab instance with its local clone, tags and the repositories it calls; the chain between them; which repositories a request is submitted to by its Source |
+| `src/repositories.ts` | The repositories dsh-superagent develops: each GitHub or GitLab instance with its local clone; which repositories a request is submitted to by its Source |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What the polling Sources share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
@@ -420,7 +420,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/gitlab-instances.spec.ts` | GitLab multi-instance settings: the legacy split (dropping the retired default project), instance-qualified source keys and registry routing |
-| `tests/repositories.spec.ts` | Repositories: the enabled instances with their tags, calls and clone, the chain up and down, which repositories a request is submitted to by its Source |
+| `tests/repositories.spec.ts` | Repositories: the enabled instances with their clone, which repositories a request is submitted to by its Source |
 | `tests/popo.spec.ts` | The POPO robot: the CLI's event and history lines as Triggers, replies and reads through the CLI, chat settings and the migration of earlier settings |
 | `tests/github-instances.spec.ts` | GitHub multi-repository settings: the legacy split, account and instance fields, instance-qualified Thread keys, and independent polls per repository |
 | `tests/source-instances.spec.ts` | Adding and removing watched repositories: creating an instance at revision 0, `Settings.remove`, the DELETE route and the history of both; switching an account off turns its instances off, and an instance cannot be switched on under an account that is off |

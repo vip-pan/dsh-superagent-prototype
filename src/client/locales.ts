@@ -415,8 +415,6 @@ const TEXT = {
   repositoryName: ['仓库', 'Repository'],
   repositoryClonePath: ['克隆位置', 'Clone'],
   repositoryCloneDefault: ['默认', 'default'],
-  repositoryTags: ['标签', 'Tags'],
-  repositoryCalls: ['调用', 'Calls'],
   environmentDescription: ['说明', 'Description'],
   environmentOwner: ['注册者', 'Registered by'],
   executorRunning: ['执行器运行中', 'Executor running'],

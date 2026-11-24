@@ -139,15 +139,13 @@ it('keeps what a person types in the Execution settings, converting it once on s
   expect(server.settings.executor).toMatchObject({ blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work', maxWorkers: 2 })
 })
 
-it('lists every repository with its clone, tags and calls under the Execution settings', async () => {
+it('lists every repository with its clone under the Execution settings', async () => {
   await mount()
   await click(zh['tab.execution'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   await click(all('[data-disclosure-row]').find(row => row.textContent!.startsWith(zh.repositoryClones))!)
   const row = all('.dt-table tr').find(item => item.textContent!.includes('acme/widgets'))!
   expect(row.textContent).toContain('/srv/clones/widgets')
-  expect(row.textContent).toContain('backend')
-  expect(row.textContent).toContain('acme/gateway')
   expect(row.textContent).not.toContain(zh.repositoryCloneDefault)
 })
 
