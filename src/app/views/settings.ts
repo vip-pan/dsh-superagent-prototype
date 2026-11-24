@@ -48,7 +48,7 @@ export function settingsView(store: Store, sources: SourceRegistry, health: Heal
     environment: { root: executionRoot(settings, stateDir), variables: declaredVariables(sources, settings),
       // Every repository with the clone its tickets are made from, so all the locations are in one place.
       repositories: repositoryNodes(settings).map(node => ({ id: node.id, kind: node.kind, repository: node.repository,
-        path: clonePath(node, stateDir), configured: node.localPath !== '', tags: node.tags, calls: node.calls })) },
+        path: clonePath(node, stateDir), configured: node.localPath !== '' })) },
   }
 }
 export type SettingsView = ReturnType<typeof settingsView>

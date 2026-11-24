@@ -8,7 +8,7 @@ import { triggerMessage } from '../executor/dsh.ts'
 import { relatedTickets, ticketCard, triggerCard } from './cards.ts'
 import type { Store } from './store.ts'
 import type { Settings } from '../policy.ts'
-import { instanceOf, nodeOf, repositoryNodes } from '../repositories.ts'
+import { instanceOf, repositoryNodes } from '../repositories.ts'
 import type { TextCache } from './cache.ts'
 
 export interface LinkHost {
@@ -55,17 +55,16 @@ function referencedTickets(host: LinkHost, trigger: Trigger, known: readonly Tic
 }
 /**
  * The repositories section of a candidate card: where the request may go and by which rule. A trigger from a repository's own Source
- * names it as the only target; a chat request lists the whole chain to follow.
+ * names it as the only target; a chat request lists every repository, and what each is and how they relate comes from the team's knowledge.
  */
 function repositoryCard(settings: Settings, trigger: Trigger) {
   const nodes = repositoryNodes(settings)
   if (!nodes.length) return {}
   const own = instanceOf(trigger.source)
   const rule = own ? `This request came from ${own}: submit it to that repository only; repositories is checked against it.`
-    : 'This request came from chat: from where it lands, follow the chain to every repository it changes, and list each in repositories so that none is missed.'
+    : 'This request came from chat: decide from the team\'s knowledge which repositories it changes, and list each in repositories so that none is missed.'
   const listed = own ? nodes.filter(node => node.id === own) : nodes
-  return { repository_rule: rule, repositories: listed.map(node => ({ repository: node.repository, id: node.id,
-    ...node.tags.length ? { tags: node.tags } : {}, ...node.calls.length ? { calls: node.calls.map(name => nodeOf(nodes, name)?.repository ?? name) } : {} })) }
+  return { repository_rule: rule, repositories: listed.map(node => ({ repository: node.repository, id: node.id })) }
 }
 /** Builds the main Session's candidate card with routing metadata, handback history, and related or referenced tickets. */
 export async function candidateCard(host: LinkHost, candidate: Candidate) {

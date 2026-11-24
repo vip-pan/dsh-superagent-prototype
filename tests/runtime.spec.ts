@@ -442,12 +442,12 @@ it('tells live workers about policy changes instead of revoking them and restart
 it('submits a chat request to every repository it names, one ticket and directory each, and refuses one that is not enabled', async () => {
   const settings = runtime.store.settings()
   runtime.store.saveSettings({ ...settings, sources: { ...settings.sources,
-    'github:acme~gateway': { enabled: true, config: { repository: 'acme/gateway', tags: 'gateway, backend', calls: 'acme/widgets' } } } })
+    'github:acme~gateway': { enabled: true, config: { repository: 'acme/gateway' } } } })
   const trigger = feishu('1', '@bot 页面太慢，优化一下')
   await receive(trigger)
   const candidate = relays(runtime.masterId).find(item => item.trigger_id === trigger.id)!
-  expect(candidate.repository_rule).toMatch(/follow the chain/)
-  expect(candidate.repositories).toEqual(expect.arrayContaining([expect.objectContaining({ repository: 'acme/gateway', tags: ['gateway', 'backend'], calls: ['acme/widgets'] })]))
+  expect(candidate.repository_rule).toMatch(/team's knowledge/)
+  expect(candidate.repositories).toEqual(expect.arrayContaining([{ repository: 'acme/gateway', id: 'github:acme~gateway' }]))
   await expect(route({ kind: 'accept', trigger_id: trigger.id, title: '优化', worktree_name: worktreeName, acknowledgement: '收到', repositories: ['acme/nowhere'] })).rejects.toThrow(/not an enabled repository/)
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '优化', worktree_name: worktreeName, acknowledgement: '收到', repositories: ['acme/gateway', 'acme/widgets'] })
   const decision = runtime.store.decisions.byThread(`feishu:${CHAT}:om_1`).find(item => item.kind === 'accept')!
